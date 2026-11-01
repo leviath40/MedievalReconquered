@@ -29,3 +29,6 @@
 /analysis/decompiled/
 __pycache__/
 *.pyc
+#    - build output (compiled from our sources, rebuilt with patches/borderless/build.py)
+patches/**/build/
+*.dll
