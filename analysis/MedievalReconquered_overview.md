@@ -1,4 +1,4 @@
-# Medieval_TW.exe: first static analysis (REA + Ghidra)
+# MedievalReconquered.exe (originally Medieval_TW.exe): first static analysis (REA + Ghidra)
 
 - Date: 2026-11-01
 - Tools: REA MCP with Ghidra 12.1.4 (default auto-analysis), REA PE-import parser, a small Python PE-header script
@@ -15,7 +15,7 @@ Every claim below is marked:
 
 | Item | Value |
 |---|---|
-| File | `MedievalReconquered\Medieval_TW.exe` |
+| File | `MedievalReconquered\MedievalReconquered.exe` (renamed from `Medieval_TW.exe`; the bytes are unchanged. The name only appears in the version resource, and the game doesn't check it) |
 | SHA-256 | `23724b034f8c97094cecd5560f053864a475a88adad077c046b2beb79331ace5` |
 | Size | 5,140,480 bytes |
 | Format | PE32, i386 (machine 0x14C), GUI subsystem, OS/subsystem version 4.0 **[confirmed]** |
@@ -394,3 +394,25 @@ There are 23 direct call/jmp sites in the original `.text`, and no data pointers
 7. **Config transform** `FUN_00409010` / flag `DAT_0079c8e8`: is it encryption, or a no-op?
 8. **Unit-column error message:** the inverted text (3.3 step 1) is a known-quirk candidate for modding documentation.
 9. **Evidence:** keep `analysis/decompiled/*.c` with this report. The Ghidra session was ephemeral, so there is no saved project; re-running `open_binary` repeats the full auto-analysis.
+
+---
+
+## 7. Display mode and the Video options menu
+
+Third pass, 2026-11-01, for the borderless fullscreen patch (`patches/borderless/`).
+
+### 7.1 Window and device **[confirmed]**
+
+- `FUN_0041f050` registers the window class (window procedure **inside Proteus**, 0xF3DA00) and creates the window with `CreateWindowExA(0, "Medieval: Total War", ..., WS_POPUP, 0, 0, DAT_008d01b4, DAT_008d01b8, ...)`. The window is already borderless; the game's only `MoveWindow` call is at 0x6D6317.
+- `D3D9.dll!Direct3DCreate9` is a **static import** of the exe (on top of Proteus's own `LoadLibrary("d3d9.dll")`), so a `d3d9.dll` in the game folder is loaded before the exe's CRT starts.
+- Proteus creates the device with `Windowed = FALSE`, `D3DSWAPEFFECT_DISCARD`, R5G6B5 back buffer at the game resolution: 800×600 at startup, 640×480 for the menus, the chosen resolution (e.g. 2560×1440) on the campaign map and in battle. `Present` is always called with NULL rectangles. Proteus never reads the present parameters back (`GetPresentParameters` is not called).
+- Mouse: window messages, plus one `GetCursorPos` call at 0x4C02DC; `SetCursorPos` and `ClipCursor` go through Proteus. `GetDeviceCaps(HORZRES/VERTRES)` is read once at startup (`FUN_0041df80`).
+- The black bars seen in battle with the interface set to **Widescreen** are by design (game option), not a display problem.
+
+### 7.2 Menu widget tables **[confirmed]**
+
+- Menus are static arrays of **0x134-byte widget records** in `.data`. Known fields: +0x00 name (char*, used by the lookup `FUN_006e1090(name)`), +0x04 enabled, +0x08 type (0x3 button/switch, 0x5 slider, 0x9 text, 0xB label), +0x0C x, +0x10 y, +0x14 visible, +0x20 style pointer, +0x24 callback, +0x2C localised-text record (0xA0-byte records whose +0x00 is the `Loc` key), +0x3C/+0x40 width/height (switch: 16×16).
+- A static constructor per menu calls `0x6EB8E0(name, table, count)`; there are 48 such menus, up to 127 widgets each.
+- Video menu (`MainMenuGraphicOptions`): table 0x8025E0, **17 records**: title (y 42), Smoke label/switch (120/140, callback 0x70A490), Wildlife label/switch (170/190, 0x70A510), default unit size label/text/slider (260/278, 0x70A590), AGP memory (350/368, 0x70A890), pyrotechnics (440/458, 0x70AA60), two type-0 widgets at y 248, bottom button (239,539, 0x70A2B0). The Dust, Ambient Flora and HQ movies texts exist in `FRONTEND.TXT` but have no widget.
+- Users of the table: the constructor call at 0x6A8790 (`push 0x11 / push 0x8025E0`), and the Options dispatcher `FUN_00709200`, which passes `[0x8C1E70]` (table) and `[0xEFF7E0]` (count) to `FUN_006e1350` with handler 0x71ABA0. `[0xEFF7E0]` is copied at startup (0x71CFB9) from `.data` 0x791050, the only reader of that value.
+- Switch callback (Smoke, 0x70A490), `cdecl int cb(widget *w)`: `w[0x2A]` = setting byte (0xE78120); `0x6E6D20(w)`; `w[0x29] = 0`; if `w->0x6DF860(0)` (thiscall, "clicked") and `[0x8DCCA8] & 0x800` and not `[0x8DCCB4] & 0x800`: `0x6E9D50(1, 0, 0, "LMB on Graphics Options Menu Smoke toggle")`, then toggle `w[0x2A]`; finally store `w[0x2A]` back to the setting.
