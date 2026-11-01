@@ -1,2 +1,2 @@
 # MedievalReconquered
-Small project to remaster Medieval Total War
+Small project to make a better old school medieval game
