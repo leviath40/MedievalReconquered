@@ -14,7 +14,7 @@ python patches\launcher\build.py            # build, install MedievalReconquered
 python patches\launcher\build.py --remove   # uninstall
 ```
 
-The game icon (`VI.ico`) is embedded when present in the game folder.
+The icon is `patches/icon/MedievalReconquered.ico`.
 
 ## How it works
 

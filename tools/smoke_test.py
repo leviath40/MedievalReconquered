@@ -47,7 +47,8 @@ HOOK_SITES = [
     0x76E4B8,                                           # CRT exit
 ]
 IMPORT_STUBS = (0x73EB8C, 0x73EC40)   # [start, end)
-PROTEUS_START = 0xF3C000              # to the end of the image
+PROTEUS_START = 0xF3C000
+PROTEUS_END = 0xF45000                # Proteus .text + .data; .rsrc (icons) may change
 
 results = []  # (status, message)
 
@@ -133,7 +134,7 @@ def static_checks(exe):
     same = new.read(lo, hi - lo) == orig.read(lo, hi - lo)
     report("PASS" if same else "FAIL", f"import stubs {lo:#x}-{hi:#x} unchanged")
 
-    end = orig.end_va()
+    end = PROTEUS_END
     try:
         same = new.read(PROTEUS_START, end - PROTEUS_START) == orig.read(PROTEUS_START, end - PROTEUS_START)
     except ValueError:

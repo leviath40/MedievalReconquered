@@ -15,7 +15,7 @@ sys.path.insert(0, str(HERE.parent / "borderless"))
 from build import find_zig, GAME_DIR  # noqa: E402
 
 OUT = HERE / "build" / "MedievalReconquered_Launcher.exe"
-ICON = GAME_DIR / "VI.ico"
+ICON = HERE.parent / "icon" / "MedievalReconquered.ico"
 
 
 def main():
@@ -27,10 +27,10 @@ def main():
         return
     OUT.parent.mkdir(exist_ok=True)
     srcs = [str(HERE / "launcher.c")]
-    if ICON.exists():   # game icon, not committed: embedded only when present
-        (OUT.parent / "game.ico").write_bytes(ICON.read_bytes())
+    if ICON.exists():
+        (OUT.parent / "app.ico").write_bytes(ICON.read_bytes())
         rc = OUT.parent / "launcher.rc"
-        rc.write_text('1 ICON "game.ico"\n')
+        rc.write_text('1 ICON "app.ico"\n')
         srcs.append(str(rc))
     cmd = [find_zig(), "cc", "-target", "x86-windows-gnu", "-O2", "-s", "-Wl,--subsystem,windows",
            "-o", str(OUT), *srcs, "-luser32", "-lgdi32"]
