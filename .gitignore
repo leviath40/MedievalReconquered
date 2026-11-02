@@ -14,6 +14,7 @@
 # 2) Project files
 !/.gitignore
 !/.gitattributes
+!/.gitattributes
 !/README.md
 !/skipcredits.txt
 
