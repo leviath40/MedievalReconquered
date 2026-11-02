@@ -21,6 +21,11 @@ Borderless=1
 KeepAspect=1
 ; 1 = write borderless.log (for debugging)
 Log=0
+; campaign map / battle resolution, 0 = keep the game's Video menu setting (set by the launcher)
+CampaignWidth=0
+CampaignHeight=0
+BattleWidth=0
+BattleHeight=0
 """
 
 

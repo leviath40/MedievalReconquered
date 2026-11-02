@@ -25,9 +25,15 @@ python tools\smoke_test.py                    # check the game still boots
 Borderless=1   ; 1 = borderless fullscreen, 0 = original exclusive fullscreen (also set by the Video menu switch)
 KeepAspect=1   ; 1 = keep the game's aspect ratio (black bars), 0 = stretch to the whole screen
 Log=0          ; 1 = write borderless.log
+CampaignWidth=0    ; campaign map resolution, 0 = keep the game's Video menu setting
+CampaignHeight=0
+BattleWidth=0      ; battle resolution, 0 = keep the game's Video menu setting
+BattleHeight=0
 ```
 
-Changes made in the Video menu apply at the next start.
+Changes made in the Video menu apply at the next start. The resolution keys are normally set by
+the launcher (`patches/launcher/`). They are applied once at startup, so the Video menu sliders
+still work during a session. A resolution the game does not offer is ignored (logged).
 
 ## How it works
 
@@ -44,4 +50,7 @@ Changes made in the Video menu apply at the next start.
   initialisers run, the proxy copies it with a label and a switch appended (cloned from the
   Wildlife ones) and points the game at the copy. The switch callback mirrors the Smoke switch
   and writes `Borderless=` to the ini. Details and addresses: `analysis/MedievalReconquered_overview.md` §7.
+- Resolution override: `Medieval.Cfg` stores the campaign/battle resolutions as indices into
+  mode lists the game builds at startup. The proxy hooks the instruction that reads them
+  (0x6DE4BE) and writes the indices of the ini resolutions first. Details: report §7.3.
 - The proxy checks the exe layout first. On a different exe it leaves the menu alone and logs it.

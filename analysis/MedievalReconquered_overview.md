@@ -416,3 +416,13 @@ Third pass, 2026-11-01, for the borderless fullscreen patch (`patches/borderless
 - Video menu (`MainMenuGraphicOptions`): table 0x8025E0, **17 records**: title (y 42), Smoke label/switch (120/140, callback 0x70A490), Wildlife label/switch (170/190, 0x70A510), default unit size label/text/slider (260/278, 0x70A590), AGP memory (350/368, 0x70A890), pyrotechnics (440/458, 0x70AA60), two type-0 widgets at y 248, bottom button (239,539, 0x70A2B0). The Dust, Ambient Flora and HQ movies texts exist in `FRONTEND.TXT` but have no widget.
 - Users of the table: the constructor call at 0x6A8790 (`push 0x11 / push 0x8025E0`), and the Options dispatcher `FUN_00709200`, which passes `[0x8C1E70]` (table) and `[0xEFF7E0]` (count) to `FUN_006e1350` with handler 0x71ABA0. `[0xEFF7E0]` is copied at startup (0x71CFB9) from `.data` 0x791050, the only reader of that value.
 - Switch callback (Smoke, 0x70A490), `cdecl int cb(widget *w)`: `w[0x2A]` = setting byte (0xE78120); `0x6E6D20(w)`; `w[0x29] = 0`; if `w->0x6DF860(0)` (thiscall, "clicked") and `[0x8DCCA8] & 0x800` and not `[0x8DCCB4] & 0x800`: `0x6E9D50(1, 0, 0, "LMB on Graphics Options Menu Smoke toggle")`, then toggle `w[0x2A]`; finally store `w[0x2A]` back to the setting.
+
+### 7.3 Display resolution **[confirmed]** (2026-11-02, for the launcher)
+
+- Current resolution globals: **0x7A2780/84** campaign map width/height, **0x7A2788/8C** battle (defaults 800×600). Startup picks one of them for the window size by game state `[0x8B8C34]` (0x41E620; 1 = battle, else campaign or 800×600).
+- Command line: a letter followed by a hex digit 0–B selects from a static table at **0x7847B0** (12 pairs, 320×240 … 2048×1536), parsed at 0x420F10 ("Resolution Values 0-7" text is outdated). One letter case sets campaign, the other battle **[inferred which]**.
+- `Medieval.Cfg` stores **indices**, not sizes: offset **0xB4** (0xE77B04) battle, **0xB8** (0xE77B08) campaign. They index per-device mode lists built at startup.
+- Device records: `0xE7A1E0 + 0x60 * [0x895F8C]`. +0x10 valid flag, +0x20/+0x44 campaign count/index array, +0x24/+0x54 battle count/index array, +0x34 mode records (32 bytes: +4 width, +8 height).
+- 0x6DE4BE–0x6DE565: clamps the cfg indices to the counts (copies in 0xE7D1F0 battle / 0xE7D1F4 campaign) and writes width/height into 0x7A2780/0x7A2788. `FUN_006de850(dev, w, h, battle)` snaps a size to the closest listed mode. The Video menu sliders write the same globals (0x70CC52, 0x70CE21).
+- The borderless proxy hooks 0x6DE4BE (`mov edx,[0xE77B04]`, 6 bytes → call + nop) to write the indices matching `CampaignWidth/Height` and `BattleWidth/Height` from the ini, once at startup. Play-tested.
+

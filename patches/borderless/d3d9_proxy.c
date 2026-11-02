@@ -10,6 +10,8 @@
  *     with black bars if KeepAspect=1;
  *   - mouse: window messages, GetCursorPos, SetCursorPos and ClipCursor are converted between
  *     monitor pixels and game pixels.
+ * Campaign/Battle Width/Height (set by the launcher) override the campaign and battle resolutions
+ * chosen in the game's Video menu.
  * It also adds a "Borderless Fullscreen" on/off switch to the in-game Video options menu, which
  * writes Borderless= in the ini (applies at the next start).
  * Nothing in the exe file is changed: everything is patched in memory at load time.
@@ -18,6 +20,10 @@
  *   [Display]
  *   Borderless=1     ; 0 = original exclusive fullscreen (the proxy only forwards)
  *   KeepAspect=1     ; 0 = stretch to the whole monitor
+ *   CampaignWidth=0  ; campaign map resolution, 0 = use the game's setting
+ *   CampaignHeight=0
+ *   BattleWidth=0    ; battle resolution, 0 = use the game's setting
+ *   BattleHeight=0
  *   Log=0            ; 1 = write borderless.log
  */
 #define WIN32_LEAN_AND_MEAN
@@ -46,6 +52,7 @@ static PFN_SetCursorPos g_realSetCursorPos;
 static PFN_ClipCursor g_realClipCursor;
 
 static int g_borderless = 1, g_keepAspect = 1, g_log = 0;
+static int g_campW, g_campH, g_batW, g_batH;   /* resolution overrides from the ini, 0 = off */
 static HWND g_hwnd;
 static WNDPROC g_origWndProc;
 static RECT g_mon;                 /* monitor rect, screen coordinates */
@@ -79,6 +86,10 @@ static void load_config(void)
     g_borderless = GetPrivateProfileIntA("Display", "Borderless", 1, ini);
     g_keepAspect = GetPrivateProfileIntA("Display", "KeepAspect", 1, ini);
     g_log = GetPrivateProfileIntA("Display", "Log", 0, ini);
+    g_campW = GetPrivateProfileIntA("Display", "CampaignWidth", 0, ini);
+    g_campH = GetPrivateProfileIntA("Display", "CampaignHeight", 0, ini);
+    g_batW = GetPrivateProfileIntA("Display", "BattleWidth", 0, ini);
+    g_batH = GetPrivateProfileIntA("Display", "BattleHeight", 0, ini);
 }
 
 /* ------------------------------------------------------------------ geometry */
@@ -390,6 +401,72 @@ static void patch_video_menu(void)
     }
 }
 
+/* ------------------------------------------------------------------ resolution override */
+/*
+ * Medieval.Cfg stores the campaign and battle resolutions as indices (0xE77B08 / 0xE77B04) into
+ * per-device mode lists the game builds at startup. At 0x6DE4BE (mov edx,[0xE77B04]) the lists
+ * exist and the game is about to clamp the indices and turn them into width/height
+ * (0x7A2780 campaign, 0x7A2788 battle). The hook writes the indices of the ini resolutions first.
+ * Device records: 0xE7A1E0 + 0x60 * [0x895F8C]; +0x34 mode records (32 bytes: +4 width,
+ * +8 height); +0x20/+0x44 campaign count/index array; +0x24/+0x54 battle count/index array.
+ */
+#define RES_HOOK   0x6DE4BEu
+#define CFG_BATTLE 0xE77B04u
+#define CFG_CAMP   0xE77B08u
+#define DEV_INDEX  0x895F8Cu
+#define DEV_TABLE  0xE7A1E0u
+
+static int find_mode(BYTE *dev, int countOff, int arrOff, int w, int h)
+{
+    if (w <= 0 || h <= 0) return -1;
+    int n = *(int *)(dev + countOff);
+    int *arr = *(int **)(dev + arrOff);
+    BYTE *modes = *(BYTE **)(dev + 0x34);
+    if (!arr || !modes) return -1;
+    for (int i = 0; i < n; i++) {
+        BYTE *m = modes + arr[i] * 32;
+        if (*(int *)(m + 4) == w && *(int *)(m + 8) == h) return i;
+    }
+    return -1;
+}
+
+__attribute__((used)) void __cdecl apply_resolution(void)
+{
+    static int done;
+    if (done) return;                                   /* startup only: in-game changes stay */
+    done = 1;
+    int d = *(int *)DEV_INDEX;
+    if (d < 0) return;
+    BYTE *dev = (BYTE *)DEV_TABLE + d * 0x60;
+    int camp = find_mode(dev, 0x20, 0x44, g_campW, g_campH);
+    int battle = find_mode(dev, 0x24, 0x54, g_batW, g_batH);
+    if (camp >= 0) *(int *)CFG_CAMP = camp;
+    if (battle >= 0) *(int *)CFG_BATTLE = battle;
+    logf("resolution: campaign %dx%d -> index %d, battle %dx%d -> index %d (-1 = game setting kept)",
+         g_campW, g_campH, camp, g_batW, g_batH, battle);
+}
+
+/* Replaces the 6-byte mov edx,[0xE77B04] with call + nop; redoes the mov after the C code. */
+void res_thunk(void);
+__asm__(".globl _res_thunk\n_res_thunk:\n"
+        "  pushal\n  call _apply_resolution\n  popal\n"
+        "  movl 0xE77B04, %edx\n  ret\n");
+
+static void patch_resolution(void)
+{
+    static const BYTE orig[6] = { 0x8B, 0x15, 0x04, 0x7B, 0xE7, 0x00 };
+    if ((g_campW <= 0 || g_campH <= 0) && (g_batW <= 0 || g_batH <= 0)) return;
+    if (memcmp((void *)RES_HOOK, orig, sizeof orig)) {
+        logf("resolution: unexpected exe layout, override not applied");
+        return;
+    }
+    BYTE code[6] = { 0xE8, 0, 0, 0, 0, 0x90 };
+    DWORD rel = (DWORD)res_thunk - (RES_HOOK + 5);
+    memcpy(code + 1, &rel, 4);
+    if (patch_mem((void *)RES_HOOK, code, sizeof code))
+        logf("resolution: override hooked");
+}
+
 /* ------------------------------------------------------------------ exports */
 
 static void load_real(void)
@@ -425,6 +502,7 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID r)
         logf("--- d3d9 proxy loaded: Borderless=%d KeepAspect=%d", g_borderless, g_keepAspect);
         g_switchState = (BYTE)(g_borderless != 0);
         patch_video_menu();
+        patch_resolution();
     }
     return TRUE;
 }
