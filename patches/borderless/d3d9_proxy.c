@@ -1073,12 +1073,23 @@ __asm__(".globl _res_thunk\n_res_thunk:\n"
  *   0x4C4347 (23 bytes)  2D tail: if (vt[0x10](p)) { FUN_00467a90(); vt[0x14](p); }
  *                        -> push esi / call ui_tail / jmp 0x4C435E
  *   0x4CEAC0             group draw(pass) -> jmp ui_group_draw (same thiscall, ret 4)
+ *   0x4B7F50             battle HUD draw (battleplayer.cpp, thiscall, ret 4): wrapped the same way, so
+ *                        the panels it draws one by one are queued too
+ *   0x467A90             the back-buffer lock every 2D drawer goes through: if 2D parts are queued,
+ *                        they are drawn first, so all 2D keeps its original order (only "a later
+ *                        panel's 3D background over an earlier panel's 2D" can change)
  */
 #define UI_TAIL         0x4C4347u
 #define UI_TAIL_END     0x4C435Eu
 #define UI_GROUP_DRAW   0x4CEAC0u
 #define FN_BACK_LOCK    0x467A90u      /* lock the back buffer for 2D drawing (no-op if locked) */
 #define FN_GROUP_ACTIVE 0x4C9620u      /* thiscall, returns al */
+#define HUD_DRAW        0x4B7F50u      /* push ebp / mov ebp,esp / sub esp,0x90 (9 bytes) */
+
+static BYTE *g_tramp;                  /* executable copies of the relocated entry instructions */
+static char (*g_lockOrig)(void);       /* original FUN_00467a90 */
+static void *g_hudOrig;                /* original FUN_004b7f50 */
+static int g_uiFlushing;
 
 typedef char (__attribute__((thiscall)) *PFN_ThisBool)(void *);
 typedef void (__attribute__((thiscall)) *PFN_ThisVoid)(void *);
@@ -1090,13 +1101,30 @@ static int g_uiQueued, g_uiDepth;
 
 static void ui_flush(void)
 {
-    if (!g_uiQueued) return;
-    ((PFN_Void)FN_BACK_LOCK)();
+    if (!g_uiQueued || g_uiFlushing) return;
+    g_uiFlushing = 1;
+    g_lockOrig();
     for (int i = 0; i < g_uiQueued; i++) {
         void *p = g_uiQueue[i];
         ((PFN_ThisVoid)(*(void ***)p)[0x14 / 4])(p);
     }
     g_uiQueued = 0;
+    g_uiFlushing = 0;
+}
+
+/* replacement entry of FUN_00467a90 */
+static char ui_lock_gate(void)
+{
+    if (g_uiQueued && !g_uiFlushing) ui_flush();
+    return g_lockOrig();
+}
+
+/* replacement entry of FUN_004b7f50 */
+static void __attribute__((thiscall)) ui_hud_draw(void *self, int pass)
+{
+    g_uiDepth++;
+    ((PFN_ThisInt)g_hudOrig)(self, pass);
+    if (--g_uiDepth == 0) ui_flush();
 }
 
 static void __stdcall ui_tail(void *p)
@@ -1106,7 +1134,8 @@ static void __stdcall ui_tail(void *p)
         g_uiQueue[g_uiQueued++] = p;
         return;
     }
-    ((PFN_Void)FN_BACK_LOCK)();
+    if (g_uiQueued) ui_flush();
+    g_lockOrig();
     ((PFN_ThisVoid)(*(void ***)p)[0x14 / 4])(p);
 }
 
@@ -1128,10 +1157,25 @@ static void patch_ui_batch(void)
                                         0x39, 0x37, 0xFA, 0xFF, 0x8B, 0x06, 0x8B, 0xCE, 0xFF, 0x50, 0x14 };
     static const BYTE group_orig[16] = { 0x8B, 0x44, 0x24, 0x04, 0x56, 0x57, 0x83, 0xF8, 0x04, 0x8B, 0xF9, 0x75,
                                          0x26, 0xE8, 0x4E, 0xAB };
-    if (memcmp((void *)UI_TAIL, tail_orig, sizeof tail_orig) || memcmp((void *)UI_GROUP_DRAW, group_orig, sizeof group_orig)) {
+    static const BYTE lock_orig[5] = { 0xA0, 0x90, 0x6A, 0x98, 0x00 };          /* mov al, [0x986a90] */
+    static const BYTE hud_orig[9] = { 0x55, 0x8B, 0xEC, 0x81, 0xEC, 0x90, 0x00, 0x00, 0x00 };
+    if (memcmp((void *)UI_TAIL, tail_orig, sizeof tail_orig) || memcmp((void *)UI_GROUP_DRAW, group_orig, sizeof group_orig) ||
+        memcmp((void *)FN_BACK_LOCK, lock_orig, sizeof lock_orig) || memcmp((void *)HUD_DRAW, hud_orig, sizeof hud_orig)) {
         logf("ui batch: code differs, not patched");
         return;
     }
+    /* trampolines: relocated entry bytes + jmp back */
+    g_tramp = VirtualAlloc(NULL, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!g_tramp) { logf("ui batch: no trampoline memory"); return; }
+    memcpy(g_tramp, lock_orig, 5);
+    g_tramp[5] = 0xE9;
+    *(DWORD *)(g_tramp + 6) = (FN_BACK_LOCK + 5) - (DWORD)(UINT_PTR)(g_tramp + 10);
+    memcpy(g_tramp + 16, hud_orig, 9);
+    g_tramp[25] = 0xE9;
+    *(DWORD *)(g_tramp + 26) = (HUD_DRAW + 9) - (DWORD)(UINT_PTR)(g_tramp + 30);
+    g_lockOrig = (char (*)(void))g_tramp;
+    g_hudOrig = g_tramp + 16;
+
     BYTE tail[23];
     memset(tail, 0x90, sizeof tail);
     tail[0] = 0x56;                                                  /* push esi */
@@ -1141,7 +1185,11 @@ static void patch_ui_batch(void)
     *(DWORD *)(tail + 7) = UI_TAIL_END - (UI_TAIL + 11);
     BYTE jmp[5] = { 0xE9 };
     *(DWORD *)(jmp + 1) = (DWORD)(UINT_PTR)ui_group_draw - (UI_GROUP_DRAW + 5);
-    int ok = patch_mem((void *)UI_TAIL, tail, sizeof tail) && patch_mem((void *)UI_GROUP_DRAW, jmp, sizeof jmp);
+    BYTE jlock[5] = { 0xE9 }, jhud[9] = { 0xE9, 0, 0, 0, 0, 0x90, 0x90, 0x90, 0x90 };
+    *(DWORD *)(jlock + 1) = (DWORD)(UINT_PTR)ui_lock_gate - (FN_BACK_LOCK + 5);
+    *(DWORD *)(jhud + 1) = (DWORD)(UINT_PTR)ui_hud_draw - (HUD_DRAW + 5);
+    int ok = patch_mem((void *)UI_TAIL, tail, sizeof tail) && patch_mem((void *)UI_GROUP_DRAW, jmp, sizeof jmp) &&
+             patch_mem((void *)FN_BACK_LOCK, jlock, sizeof jlock) && patch_mem((void *)HUD_DRAW, jhud, sizeof jhud);
     logf("ui batch: %s", ok ? "patched" : "patch failed");
 }
 
