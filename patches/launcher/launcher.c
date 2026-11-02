@@ -19,7 +19,7 @@
 
 #define GAME_EXE "MedievalReconquered.exe"
 #define BG_FILE  "frontend_files/default_parchment_wide.tga"
-#define CLIENT_W 520                /* 800x600 texture at 0.65: parchment x 75-437, y 16-365 */
+#define CLIENT_W 520                /* 800x600 texture at 0.65: parchment x 75-437, y 16-365, banner removed */
 #define CLIENT_H 390
 #define ID_CAMP  100
 #define ID_RES   101
@@ -68,6 +68,34 @@ static void load_logo(HINSTANCE inst)
     g_logoH = h;
 }
 
+/* Paint over the scroll banner at the top of the parchment (800x600 image coordinates): copy the
+ * parchment from SHIFT rows below, scaled per row and channel by the edge darkening measured beside
+ * the banner, feathered over 12 px at the sides. */
+static void remove_banner(BYTE *bits, int w, int ht, size_t stride, int topdown)
+{
+    enum { X0 = 225, X1 = 590, Y0 = 20, Y1 = 78, SHIFT = 60 };
+    if (w != 800 || ht != 600) return;
+#define PX(x, y) (bits + stride * (size_t)(topdown ? (y) : ht - 1 - (y)) + (size_t)(x) * 3)
+    for (int y = Y0; y < Y1; y++) {
+        double sum[2][3] = { { 0 } };
+        for (int x = 120; x < 680; x++) {
+            if (x == 215) x = 600;                          /* reference columns: 120-214, 600-679 */
+            for (int c = 0; c < 3; c++) { sum[0][c] += PX(x, y)[c]; sum[1][c] += PX(x, y + SHIFT)[c]; }
+        }
+        for (int x = X0; x < X1; x++) {
+            double t = (x - X0) / 12.0, t2 = (X1 - 1 - x) / 12.0;
+            if (t2 < t) t = t2;
+            if (t > 1) t = 1;
+            BYTE *d = PX(x, y), *src = PX(x, y + SHIFT);
+            for (int c = 0; c < 3; c++) {
+                double v = d[c] * (1 - t) + src[c] * (sum[1][c] > 0 ? sum[0][c] / sum[1][c] : 1) * t;
+                d[c] = (BYTE)(v > 255 ? 255 : v + 0.5);
+            }
+        }
+    }
+#undef PX
+}
+
 /* Uncompressed 24-bit TGA (type 2), the layout the game's frontend files use. */
 static void load_background(void)
 {
@@ -85,6 +113,7 @@ static void load_background(void)
         for (int y = 0; ok && y < ht; y++)
             ok = fread(bits + stride * y, 1, row, f) == row;
         if (ok) {
+            remove_banner(bits, w, ht, stride, (h[17] & 0x20) != 0);
             g_bgBits = bits;
             g_bgInfo.bmiHeader = (BITMAPINFOHEADER){ .biSize = sizeof(BITMAPINFOHEADER), .biWidth = w,
                 .biHeight = (h[17] & 0x20) ? -ht : ht, .biPlanes = 1, .biBitCount = 24 };
@@ -118,19 +147,19 @@ static void paint(HWND win)
     }
     SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, g_bgBits ? RGB(70, 40, 20) : GetSysColor(COLOR_BTNTEXT));
-    if (g_emblem) DrawIconEx(dc, (CLIENT_W - 72) / 2, 52, g_emblem, 72, 72, 0, NULL, DI_NORMAL);
+    if (g_emblem) DrawIconEx(dc, (CLIENT_W - 72) / 2, 28, g_emblem, 72, 72, 0, NULL, DI_NORMAL);
     HFONT oldFont = SelectObject(dc, g_labelFont);
     if (g_logoDC) {
         BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
-        AlphaBlend(dc, (CLIENT_W - g_logoW) / 2, 128, g_logoW, g_logoH, g_logoDC, 0, 0, g_logoW, g_logoH, bf);
+        AlphaBlend(dc, (CLIENT_W - g_logoW) / 2, 104, g_logoW, g_logoH, g_logoDC, 0, 0, g_logoW, g_logoH, bf);
     } else {
-        text_at(dc, "Medieval Reconquered", 0, 128, CLIENT_W, 36, DT_CENTER);
+        text_at(dc, "Medieval Reconquered", 0, 104, CLIENT_W, 36, DT_CENTER);
     }
-    text_at(dc, "Campaign map:", 100, 204, 130, 24, DT_LEFT);
-    text_at(dc, "Battle:", 100, 231, 130, 24, DT_LEFT);
-    text_at(dc, "Display mode:", 100, 258, 130, 24, DT_LEFT);
-    text_at(dc, "FPS counter:", 100, 285, 130, 24, DT_LEFT);
-    text_at(dc, "Limit to 60 FPS:", 100, 312, 140, 24, DT_LEFT);
+    text_at(dc, "Campaign map:", 100, 180, 130, 24, DT_LEFT);
+    text_at(dc, "Battle:", 100, 207, 130, 24, DT_LEFT);
+    text_at(dc, "Display mode:", 100, 234, 130, 24, DT_LEFT);
+    text_at(dc, "FPS counter:", 100, 261, 130, 24, DT_LEFT);
+    text_at(dc, "Limit to 60 FPS:", 100, 288, 140, 24, DT_LEFT);
     SelectObject(dc, oldFont);
     BitBlt(wdc, 0, 0, CLIENT_W, CLIENT_H, dc, 0, 0, SRCCOPY);
     SelectObject(dc, oldBmp);
@@ -235,13 +264,13 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
     case WM_CREATE:
-        g_camp = add(h, "COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 240, 205, 180, 300, ID_CAMP);
-        g_res = add(h, "COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 240, 232, 180, 300, ID_RES);
-        g_mode = add(h, "COMBOBOX", "", CBS_DROPDOWNLIST | WS_TABSTOP, 240, 259, 180, 100, ID_MODE);
-        g_fps = add(h, "BUTTON", "", BS_AUTOCHECKBOX | WS_TABSTOP, 240, 289, 16, 16, ID_FPS);
-        g_limit = add(h, "BUTTON", "", BS_AUTOCHECKBOX | WS_TABSTOP, 240, 316, 16, 16, ID_LIMIT);
-        add(h, "BUTTON", "Play", BS_DEFPUSHBUTTON | WS_TABSTOP, 150, 342, 100, 30, ID_PLAY);
-        add(h, "BUTTON", "Quit", WS_TABSTOP, 270, 342, 100, 30, ID_QUIT);
+        g_camp = add(h, "COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 240, 181, 180, 300, ID_CAMP);
+        g_res = add(h, "COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 240, 208, 180, 300, ID_RES);
+        g_mode = add(h, "COMBOBOX", "", CBS_DROPDOWNLIST | WS_TABSTOP, 240, 235, 180, 100, ID_MODE);
+        g_fps = add(h, "BUTTON", "", BS_AUTOCHECKBOX | WS_TABSTOP, 240, 265, 16, 16, ID_FPS);
+        g_limit = add(h, "BUTTON", "", BS_AUTOCHECKBOX | WS_TABSTOP, 240, 292, 16, 16, ID_LIMIT);
+        add(h, "BUTTON", "Play", BS_DEFPUSHBUTTON | WS_TABSTOP, 150, 318, 100, 30, ID_PLAY);
+        add(h, "BUTTON", "Quit", WS_TABSTOP, 270, 318, 100, 30, ID_QUIT);
         fill_controls();
         return 0;
     case WM_ERASEBKGND:

@@ -22,6 +22,8 @@ embedded as resource 2.
 - Background: the game's main-menu parchment (`frontend_files/default_parchment_wide.tga`), read
   from the game folder at run time, so no game art is in the repo or the launcher binary. Without
   the file the launcher uses the plain Windows look.
+- The scroll banner at the top of that parchment is painted over in memory at load time (parchment
+  copied from below, with the edge darkening measured beside the banner), freeing room for the controls.
 - Lists the monitor's display modes (800×600 and up) plus "Game setting (Video menu)".
 - **FPS counter** and **Limit to 60 FPS** checkboxes (off by default) for the proxy's framerate counter and cap.
 - **Play** writes `CampaignWidth`/`CampaignHeight`, `BattleWidth`/`BattleHeight`, `Borderless`, `ShowFPS` and `FPSLimit` (60 or 0)
