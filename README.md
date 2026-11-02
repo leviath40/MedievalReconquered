@@ -10,6 +10,8 @@ patch scripts and sources; they are applied to your own install.
   ratio kept, mouse mapped correctly; on/off switch added to the game's Video options menu.
 - **Launcher** (`patches/launcher/`): campaign map and battle resolution (any monitor mode),
   display mode, FPS counter, 60 FPS cap.
+- **Sharper menus**: the 800x600 menus are upscaled with a smooth GPU shader instead of a plain
+  stretch (borderless mode).
 - **FPS counter** at the top right of the screen (optional).
 - **Frame rate cap** at 60 FPS (optional).
 
@@ -22,7 +24,7 @@ patch scripts and sources; they are applied to your own install.
 - **Built-in profiler** (`profile.log`), always on, to catch regressions and find new bottlenecks.
 
 ### Look and feel
-- **New logo** on the main menu and the loading screen; main-menu parchment without the scroll
+- **New logo** on the main menu (drawn at full screen resolution with menu upscaling) and the loading screen; main-menu parchment without the scroll
   banner (`patches/logo/`).
 - **New icon** for the game and the launcher (`patches/icon/`).
 - **Boot intro skipped** (the game's own `skipcredits.txt` switch).
