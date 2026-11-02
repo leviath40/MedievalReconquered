@@ -18,6 +18,9 @@ The icon is `patches/icon/MedievalReconquered.ico`.
 
 ## How it works
 
+- Background: the game's main-menu parchment (`frontend_files/default_parchment_wide.tga`), read
+  from the game folder at run time, so no game art is in the repo or the launcher binary. Without
+  the file the launcher uses the plain Windows look.
 - Lists the monitor's display modes (800×600 and up) plus "Game setting (Video menu)".
 - **Play** writes `CampaignWidth`/`CampaignHeight`, `BattleWidth`/`BattleHeight` and `Borderless`
   to `MedievalReconquered.ini`, then starts `MedievalReconquered.exe` and closes.

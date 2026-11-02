@@ -6,6 +6,10 @@
  * proxy (patches/borderless) reads them at startup: Borderless selects borderless or exclusive
  * fullscreen, the sizes override the campaign and battle resolutions of the game's Video menu
  * (0: keep the game's setting).
+ *
+ * Background: the game's main-menu parchment (frontend_files/default_parchment_wide.tga), read
+ * from the game folder at run time, so no game art is part of the launcher. Without it the
+ * window falls back to the plain system look.
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -14,6 +18,9 @@
 #include <stdlib.h>
 
 #define GAME_EXE "MedievalReconquered.exe"
+#define BG_FILE  "frontend_files/default_parchment_wide.tga"
+#define CLIENT_W 520                /* 800x600 texture at 0.65: parchment x 75-437, y 16-365 */
+#define CLIENT_H 390
 #define ID_CAMP  100
 #define ID_RES   101
 #define ID_MODE  102
@@ -25,6 +32,75 @@ static Mode g_modes[128];
 static int g_nModes;
 static char g_dir[MAX_PATH], g_ini[MAX_PATH];
 static HWND g_camp, g_res, g_mode;    /* g_res: battle resolution */
+static BYTE *g_bgBits;                /* 24-bit bottom-up pixels, DIB layout */
+static BITMAPINFO g_bgInfo;
+static HFONT g_titleFont, g_labelFont;
+static HICON g_emblem;
+
+/* Uncompressed 24-bit TGA (type 2), the layout the game's frontend files use. */
+static void load_background(void)
+{
+    char path[MAX_PATH];
+    snprintf(path, sizeof path, "%s%s", g_dir, BG_FILE);
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    BYTE h[18];
+    if (fread(h, 1, 18, f) == 18 && h[1] == 0 && h[2] == 2 && h[16] == 24) {
+        int w = h[12] | h[13] << 8, ht = h[14] | h[15] << 8;
+        size_t stride = ((size_t)w * 3 + 3) & ~(size_t)3, row = (size_t)w * 3;
+        BYTE *bits = calloc(stride, ht);
+        fseek(f, 18 + h[0], SEEK_SET);
+        int ok = bits != NULL;
+        for (int y = 0; ok && y < ht; y++)
+            ok = fread(bits + stride * y, 1, row, f) == row;
+        if (ok) {
+            g_bgBits = bits;
+            g_bgInfo.bmiHeader = (BITMAPINFOHEADER){ .biSize = sizeof(BITMAPINFOHEADER), .biWidth = w,
+                .biHeight = (h[17] & 0x20) ? -ht : ht, .biPlanes = 1, .biBitCount = 24 };
+        } else {
+            free(bits);
+        }
+    }
+    fclose(f);
+}
+
+static void text_at(HDC dc, const char *s, int x, int y, int w, int h, UINT fmt)
+{
+    RECT r = { x, y, x + w, y + h };
+    DrawTextA(dc, s, -1, &r, fmt | DT_SINGLELINE | DT_VCENTER);
+}
+
+static void paint(HWND win)
+{
+    PAINTSTRUCT ps;
+    HDC wdc = BeginPaint(win, &ps);
+    HDC dc = CreateCompatibleDC(wdc);
+    HBITMAP bmp = CreateCompatibleBitmap(wdc, CLIENT_W, CLIENT_H), oldBmp = SelectObject(dc, bmp);
+    if (g_bgBits) {
+        SetStretchBltMode(dc, HALFTONE);
+        SetBrushOrgEx(dc, 0, 0, NULL);
+        StretchDIBits(dc, 0, 0, CLIENT_W, CLIENT_H, 0, 0, g_bgInfo.bmiHeader.biWidth,
+                      abs(g_bgInfo.bmiHeader.biHeight), g_bgBits, &g_bgInfo, DIB_RGB_COLORS, SRCCOPY);
+    } else {
+        RECT r = { 0, 0, CLIENT_W, CLIENT_H };
+        FillRect(dc, &r, GetSysColorBrush(COLOR_BTNFACE));
+    }
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, g_bgBits ? RGB(70, 40, 20) : GetSysColor(COLOR_BTNTEXT));
+    if (g_emblem) DrawIconEx(dc, (CLIENT_W - 72) / 2, 52, g_emblem, 72, 72, 0, NULL, DI_NORMAL);
+    HFONT oldFont = SelectObject(dc, g_titleFont);
+    text_at(dc, "Medieval Reconquered", 0, 128, CLIENT_W, 36, DT_CENTER);
+    SelectObject(dc, g_labelFont);
+    text_at(dc, "Campaign map:", 100, 182, 130, 24, DT_LEFT);
+    text_at(dc, "Battle:", 100, 217, 130, 24, DT_LEFT);
+    text_at(dc, "Display mode:", 100, 252, 130, 24, DT_LEFT);
+    SelectObject(dc, oldFont);
+    BitBlt(wdc, 0, 0, CLIENT_W, CLIENT_H, dc, 0, 0, SRCCOPY);
+    SelectObject(dc, oldBmp);
+    DeleteObject(bmp);
+    DeleteDC(dc);
+    EndPaint(win, &ps);
+}
 
 static int cmp_mode(const void *a, const void *b)
 {
@@ -116,15 +192,17 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
     case WM_CREATE:
-        add(h, "STATIC", "Campaign map:", 0, 16, 20, 90, 20, 0);
-        g_camp = add(h, "COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 110, 16, 190, 300, ID_CAMP);
-        add(h, "STATIC", "Battle:", 0, 16, 54, 90, 20, 0);
-        g_res = add(h, "COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 110, 50, 190, 300, ID_RES);
-        add(h, "STATIC", "Display mode:", 0, 16, 88, 90, 20, 0);
-        g_mode = add(h, "COMBOBOX", "", CBS_DROPDOWNLIST | WS_TABSTOP, 110, 84, 190, 100, ID_MODE);
-        add(h, "BUTTON", "Play", BS_DEFPUSHBUTTON | WS_TABSTOP, 110, 126, 90, 28, ID_PLAY);
-        add(h, "BUTTON", "Quit", WS_TABSTOP, 210, 126, 90, 28, ID_QUIT);
+        g_camp = add(h, "COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 240, 182, 180, 300, ID_CAMP);
+        g_res = add(h, "COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 240, 217, 180, 300, ID_RES);
+        g_mode = add(h, "COMBOBOX", "", CBS_DROPDOWNLIST | WS_TABSTOP, 240, 252, 180, 100, ID_MODE);
+        add(h, "BUTTON", "Play", BS_DEFPUSHBUTTON | WS_TABSTOP, 150, 312, 100, 30, ID_PLAY);
+        add(h, "BUTTON", "Quit", WS_TABSTOP, 270, 312, 100, 30, ID_QUIT);
         fill_controls();
+        return 0;
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT:
+        paint(h);
         return 0;
     case WM_COMMAND:
         if (LOWORD(wp) == ID_PLAY || LOWORD(wp) == IDOK) {
@@ -148,6 +226,12 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     if (s) s[1] = 0;
     snprintf(g_ini, sizeof g_ini, "%sMedievalReconquered.ini", g_dir);
     list_modes();
+    load_background();
+    g_emblem = LoadImageA(inst, MAKEINTRESOURCEA(1), IMAGE_ICON, 72, 72, 0);
+    g_titleFont = CreateFontA(30, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY,
+                              0, "Georgia");
+    g_labelFont = CreateFontA(17, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY,
+                              0, "Georgia");
 
     WNDCLASSA wc = { 0 };
     wc.lpfnWndProc = wndproc;
@@ -158,8 +242,8 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     wc.lpszClassName = "MedievalReconqueredLauncher";
     RegisterClassA(&wc);
 
-    DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-    RECT r = { 0, 0, 320, 170 };
+    DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
+    RECT r = { 0, 0, CLIENT_W, CLIENT_H };
     AdjustWindowRect(&r, style, FALSE);
     int w = r.right - r.left, h = r.bottom - r.top;
     HWND win = CreateWindowExA(0, wc.lpszClassName, "Medieval Reconquered", style,
