@@ -436,3 +436,7 @@ Third pass, 2026-11-01, for the borderless fullscreen patch (`patches/borderless
 
 - `.bif` loader: `FUN_00402240` (`bifstuff.cpp`) dispatches on extension (`Bif`/`Tga`/`Lbm`); Bif files are read whole (`FUN_004090a0`) and decoded per frame by `FUN_0073d9eb`. Format: 256 × u16 RGB565 palette, then u32 width, height, unknown (0x6A on 1-frame frontend art), frames, 1, then frame offsets relative to 0x214. Each row: u16 byte length (incl. itself), then RLE ops: `00 n` skip n, `c<0x80 v` repeat v c+1 times, `c>=0x80` literal run of 256-c bytes. Magenta (`0xF81F`) maps to transparent. Codec: `tools/bif.py`.
 - Logos: main menu `frontend_files/Main_Menu/MTW_LOGO.BIF` (321×131 sprite), loading screen `frontend_files/Load Screen.tga` and `Load Screen.BIF` (1280×1024; the exe references both). `patches/logo/build_logo.py` rebuilds them from the originals plus `patches/logo/logo_src.png`; it also removes the scroll banner from the menu parchment (`Main_Menu/parch322x536_no_border.BIF`, the only menu using it). Transparent sprite pixels (skip ops + magenta index 0) render correctly in game (screenshot-checked).
+
+## 10. Large Address Aware (2026-11-02)
+
+- The shipped exe lacks `IMAGE_FILE_LARGE_ADDRESS_AWARE` (Characteristics 0x010E), so it is limited to 2 GB. A 64-bit port is not realistic (no source; pointer-size assumptions throughout). `patches/laa/apply_laa.py` sets the flag (0x012E) and refreshes the PE checksum. Boot smoke test passes; memory above 2 GB is only reached in heavy play, so long sessions are the real test.
