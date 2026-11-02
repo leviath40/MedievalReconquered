@@ -1,7 +1,7 @@
 /*
  * Medieval Reconquered launcher: pick the resolution and the display mode, then start the game.
  *
- * Writes [Display] CampaignWidth/Height, BattleWidth/Height and Borderless in
+ * Writes [Display] CampaignWidth/Height, BattleWidth/Height, Borderless and ShowFPS in
  * MedievalReconquered.ini (next to this exe) and starts MedievalReconquered.exe. The d3d9.dll
  * proxy (patches/borderless) reads them at startup: Borderless selects borderless or exclusive
  * fullscreen, the sizes override the campaign and battle resolutions of the game's Video menu
@@ -26,12 +26,13 @@
 #define ID_MODE  102
 #define ID_PLAY  103
 #define ID_QUIT  104
+#define ID_FPS   105
 
 typedef struct { int w, h; } Mode;
 static Mode g_modes[128];
 static int g_nModes;
 static char g_dir[MAX_PATH], g_ini[MAX_PATH];
-static HWND g_camp, g_res, g_mode;    /* g_res: battle resolution */
+static HWND g_camp, g_res, g_mode, g_fps;    /* g_res: battle resolution */
 static BYTE *g_bgBits;                /* 24-bit bottom-up pixels, DIB layout */
 static BITMAPINFO g_bgInfo;
 static HFONT g_labelFont;
@@ -124,9 +125,10 @@ static void paint(HWND win)
     } else {
         text_at(dc, "Medieval Reconquered", 0, 128, CLIENT_W, 36, DT_CENTER);
     }
-    text_at(dc, "Campaign map:", 100, 214, 130, 24, DT_LEFT);
-    text_at(dc, "Battle:", 100, 247, 130, 24, DT_LEFT);
-    text_at(dc, "Display mode:", 100, 280, 130, 24, DT_LEFT);
+    text_at(dc, "Campaign map:", 100, 206, 130, 24, DT_LEFT);
+    text_at(dc, "Battle:", 100, 235, 130, 24, DT_LEFT);
+    text_at(dc, "Display mode:", 100, 264, 130, 24, DT_LEFT);
+    text_at(dc, "FPS counter:", 100, 293, 130, 24, DT_LEFT);
     SelectObject(dc, oldFont);
     BitBlt(wdc, 0, 0, CLIENT_W, CLIENT_H, dc, 0, 0, SRCCOPY);
     SelectObject(dc, oldBmp);
@@ -197,6 +199,7 @@ static void fill_controls(void)
     SendMessageA(g_mode, CB_ADDSTRING, 0, (LPARAM)"Fullscreen");
     SendMessageA(g_mode, CB_ADDSTRING, 0, (LPARAM)"Borderless Fullscreen");
     SendMessageA(g_mode, CB_SETCURSEL, GetPrivateProfileIntA("Display", "Borderless", 1, g_ini) ? 1 : 0, 0);
+    SendMessageA(g_fps, BM_SETCHECK, GetPrivateProfileIntA("Display", "ShowFPS", 0, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
 }
 
 static int save_and_play(HWND win)
@@ -205,6 +208,8 @@ static int save_and_play(HWND win)
     save_res(g_res, "BattleWidth", "BattleHeight");
     WritePrivateProfileStringA("Display", "Borderless",
                                SendMessageA(g_mode, CB_GETCURSEL, 0, 0) == 1 ? "1" : "0", g_ini);
+    WritePrivateProfileStringA("Display", "ShowFPS",
+                               SendMessageA(g_fps, BM_GETCHECK, 0, 0) == BST_CHECKED ? "1" : "0", g_ini);
 
     char exe[MAX_PATH];
     snprintf(exe, sizeof exe, "%s%s", g_dir, GAME_EXE);
@@ -225,15 +230,22 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
     case WM_CREATE:
-        g_camp = add(h, "COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 240, 214, 180, 300, ID_CAMP);
-        g_res = add(h, "COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 240, 247, 180, 300, ID_RES);
-        g_mode = add(h, "COMBOBOX", "", CBS_DROPDOWNLIST | WS_TABSTOP, 240, 280, 180, 100, ID_MODE);
-        add(h, "BUTTON", "Play", BS_DEFPUSHBUTTON | WS_TABSTOP, 150, 320, 100, 30, ID_PLAY);
-        add(h, "BUTTON", "Quit", WS_TABSTOP, 270, 320, 100, 30, ID_QUIT);
+        g_camp = add(h, "COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 240, 207, 180, 300, ID_CAMP);
+        g_res = add(h, "COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 240, 236, 180, 300, ID_RES);
+        g_mode = add(h, "COMBOBOX", "", CBS_DROPDOWNLIST | WS_TABSTOP, 240, 265, 180, 100, ID_MODE);
+        g_fps = add(h, "BUTTON", "", BS_AUTOCHECKBOX | WS_TABSTOP, 240, 297, 16, 16, ID_FPS);
+        add(h, "BUTTON", "Play", BS_DEFPUSHBUTTON | WS_TABSTOP, 150, 326, 100, 30, ID_PLAY);
+        add(h, "BUTTON", "Quit", WS_TABSTOP, 270, 326, 100, 30, ID_QUIT);
         fill_controls();
         return 0;
     case WM_ERASEBKGND:
         return 1;
+    case WM_CTLCOLORSTATIC:     /* the checkbox: no grey box on the parchment */
+        if ((HWND)lp == g_fps) {
+            SetBkMode((HDC)wp, TRANSPARENT);
+            return (LRESULT)GetStockObject(NULL_BRUSH);
+        }
+        break;
     case WM_PAINT:
         paint(h);
         return 0;
