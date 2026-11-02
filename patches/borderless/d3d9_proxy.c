@@ -26,6 +26,7 @@
  *   BattleHeight=0
  *   ShowFPS=0        ; 1 = framerate counter at the top right (works in both display modes)
  *   FPSLimit=0       ; frame rate cap, e.g. 60 (0 = off; works in both display modes)
+ *   BatchUI=1        ; 1 = draw the battle UI panels' 2D parts under one back-buffer lock (faster)
  *   Profile=0        ; 1 = write profile.log: per-second breakdown of frame time (diagnostics)
  *   Log=0            ; 1 = write borderless.log
  */
@@ -57,7 +58,7 @@ static PFN_GetCursorPos g_realGetCursorPos;
 static PFN_SetCursorPos g_realSetCursorPos;
 static PFN_ClipCursor g_realClipCursor;
 
-static int g_borderless = 1, g_keepAspect = 1, g_log = 0, g_showFps = 0, g_fpsLimit = 0, g_profile = 0;
+static int g_borderless = 1, g_keepAspect = 1, g_log = 0, g_showFps = 0, g_fpsLimit = 0, g_profile = 0, g_batchUI = 1;
 static int g_campW, g_campH, g_batW, g_batH;   /* resolution overrides from the ini, 0 = off */
 static HWND g_hwnd;
 static WNDPROC g_origWndProc;
@@ -95,6 +96,7 @@ static void load_config(void)
     g_showFps = GetPrivateProfileIntA("Display", "ShowFPS", 0, ini);
     g_fpsLimit = GetPrivateProfileIntA("Display", "FPSLimit", 0, ini);
     g_profile = GetPrivateProfileIntA("Display", "Profile", 0, ini);
+    g_batchUI = GetPrivateProfileIntA("Display", "BatchUI", 1, ini);
     if (g_fpsLimit < 0 || g_fpsLimit > 1000) g_fpsLimit = 0;
     g_campW = GetPrivateProfileIntA("Display", "CampaignWidth", 0, ini);
     g_campH = GetPrivateProfileIntA("Display", "CampaignHeight", 0, ini);
@@ -474,22 +476,42 @@ static HRESULT STDMETHODCALLTYPE pk_TexLock(void *t, UINT lvl, D3DLOCKED_RECT *l
 }
 
 /* surface locks by call site + surface kind, dumped every 10 s (top entries by time) */
-typedef struct { void *caller; D3DSURFACE_DESC d; DWORD flags; LONG rw, rh; LONGLONG t; unsigned n; } SiteStat;
+typedef struct { void *caller, *g[5]; D3DSURFACE_DESC d; DWORD flags; LONG rw, rh; LONGLONG t; unsigned n;
+                 unsigned drawsBefore; } SiteStat;
+static unsigned g_drawsSinceLock;
 static SiteStat g_sites[64];
 static unsigned g_drawKind[4];
 static LONGLONG g_drawKindT[4];
 
+/* Is a a plausible return address in the game's original code (preceded by a call instruction)? */
+static int game_ret(DWORD a)
+{
+    if (a < 0x401010 || a >= 0x78358E) return 0;
+    const BYTE *b = (const BYTE *)a;
+    return b[-5] == 0xE8 || (b[-2] == 0xFF && (b[-1] & 0x38) == 0x10) || (b[-3] == 0xFF && (b[-2] & 0x38) == 0x10) ||
+           (b[-6] == 0xFF && (b[-5] & 0x38) == 0x10) || (b[-7] == 0xFF && (b[-6] & 0x38) == 0x10);
+}
+
 static void site_add(void *caller, const D3DSURFACE_DESC *d, DWORD flags, const RECT *r, LONGLONG t)
 {
+    void *g[5] = { 0 };
+    int ng = 0;
+    if (d->Usage & D3DUSAGE_RENDERTARGET) {
+        DWORD *sp = (DWORD *)__builtin_frame_address(0);
+        DWORD *top = (DWORD *)((NT_TIB *)NtCurrentTeb())->StackBase;  /* stay inside this thread's stack */
+        for (int i = 0; i < 1500 && ng < 5 && sp + i < top; i++)
+            if (game_ret(sp[i]) && (!ng || g[ng - 1] != (void *)sp[i])) g[ng++] = (void *)sp[i];
+    }
     LONG rw = r ? r->right - r->left : -1, rh = r ? r->bottom - r->top : -1;
     for (int i = 0; i < 64; i++) {
         SiteStat *e = &g_sites[i];
-        if (e->n && (e->caller != caller || e->flags != flags || e->rw != rw || e->rh != rh ||
+        if (e->n && (e->caller != caller || memcmp(e->g, g, sizeof g) || e->flags != flags || e->rw != rw || e->rh != rh ||
                      e->d.Format != d->Format || e->d.Usage != d->Usage || e->d.Pool != d->Pool ||
                      e->d.Width != d->Width || e->d.Height != d->Height))
             continue;
-        if (!e->n) { e->caller = caller; e->d = *d; e->flags = flags; e->rw = rw; e->rh = rh; }
+        if (!e->n) { e->caller = caller; memcpy(e->g, g, sizeof g); e->d = *d; e->flags = flags; e->rw = rw; e->rh = rh; }
         e->n++;
+        e->drawsBefore += g_drawsSinceLock;
         e->t += t;
         return;
     }
@@ -498,16 +520,18 @@ static void site_add(void *caller, const D3DSURFACE_DESC *d, DWORD flags, const 
 static void sites_dump(FILE *f)
 {
     double ms = 1000.0 / (double)g_pFreq.QuadPart;
-    fprintf(f, "  surface locks, last 10 s (caller fmt usage pool WxH flags rect: calls, total ms, ms/call):\n");
-    for (int k = 0; k < 10; k++) {
+    fprintf(f, "  surface locks, last 10 s (caller [game ret1 ret2] fmt usage pool WxH flags rect: calls, total ms, "
+               "ms/call, draws before):\n");
+    for (int k = 0; k < 16; k++) {
         int best = -1;
         for (int i = 0; i < 64; i++)
             if (g_sites[i].n && (best < 0 || g_sites[i].t > g_sites[best].t)) best = i;
         if (best < 0) break;
         SiteStat *e = &g_sites[best];
-        fprintf(f, "    %p fmt %d usage %#lx pool %d %ux%u flags %#lx rect %ldx%ld: %u, %.1f, %.3f\n", e->caller,
-                (int)e->d.Format, e->d.Usage, (int)e->d.Pool, e->d.Width, e->d.Height, e->flags, e->rw, e->rh,
-                e->n, (double)e->t * ms, (double)e->t * ms / e->n);
+        fprintf(f, "    %p [%p %p %p %p %p] fmt %d usage %#lx pool %d %ux%u flags %#lx rect %ldx%ld: %u, %.1f, %.3f, %.1f\n",
+                e->caller, e->g[0], e->g[1], e->g[2], e->g[3], e->g[4], (int)e->d.Format, e->d.Usage, (int)e->d.Pool, e->d.Width, e->d.Height,
+                e->flags, e->rw, e->rh, e->n, (double)e->t * ms, (double)e->t * ms / e->n,
+                (double)e->drawsBefore / e->n);
         e->n = 0;
         e->t = 0;
     }
@@ -528,6 +552,7 @@ static HRESULT STDMETHODCALLTYPE pk_SurfLock(void *s, D3DLOCKED_RECT *lr, const 
     LONGLONG t0 = qpc();
     TIMED(A_SURF, ((PFN_SurfLock)orig_of(g_hSurf, s))(s, lr, r, flags));
     site_add(__builtin_return_address(0), &d, flags, r, qpc() - t0);
+    if (d.Usage & D3DUSAGE_RENDERTARGET) g_drawsSinceLock = 0;
     return hr;
 }
 
@@ -548,22 +573,22 @@ static HRESULT STDMETHODCALLTYPE pk_EndScene(IDirect3DDevice9 *d)               
 
 typedef HRESULT (STDMETHODCALLTYPE *PFN_DP)(IDirect3DDevice9 *, D3DPRIMITIVETYPE, UINT, UINT);
 static HRESULT STDMETHODCALLTYPE pk_DP(IDirect3DDevice9 *d, D3DPRIMITIVETYPE t, UINT a, UINT b)    /* 81 */
-{ HRESULT hr; LONGLONG t0 = qpc(); TIMED(A_DRAW, ORIG(81, PFN_DP)(d, t, a, b)); g_drawKind[0]++; g_drawKindT[0] += qpc() - t0; return hr; }
+{ HRESULT hr; LONGLONG t0 = qpc(); TIMED(A_DRAW, ORIG(81, PFN_DP)(d, t, a, b)); g_drawKind[0]++; g_drawsSinceLock++; g_drawKindT[0] += qpc() - t0; return hr; }
 
 typedef HRESULT (STDMETHODCALLTYPE *PFN_DIP)(IDirect3DDevice9 *, D3DPRIMITIVETYPE, INT, UINT, UINT, UINT, UINT);
 static HRESULT STDMETHODCALLTYPE pk_DIP(IDirect3DDevice9 *d, D3DPRIMITIVETYPE t, INT a, UINT b, UINT c, UINT e,
                                         UINT f)                                                 /* 82 */
-{ HRESULT hr; LONGLONG t0 = qpc(); TIMED(A_DRAW, ORIG(82, PFN_DIP)(d, t, a, b, c, e, f)); g_drawKind[1]++; g_drawKindT[1] += qpc() - t0; return hr; }
+{ HRESULT hr; LONGLONG t0 = qpc(); TIMED(A_DRAW, ORIG(82, PFN_DIP)(d, t, a, b, c, e, f)); g_drawKind[1]++; g_drawsSinceLock++; g_drawKindT[1] += qpc() - t0; return hr; }
 
 typedef HRESULT (STDMETHODCALLTYPE *PFN_DPUP)(IDirect3DDevice9 *, D3DPRIMITIVETYPE, UINT, const void *, UINT);
 static HRESULT STDMETHODCALLTYPE pk_DPUP(IDirect3DDevice9 *d, D3DPRIMITIVETYPE t, UINT a, const void *p, UINT s)
-{ HRESULT hr; LONGLONG t0 = qpc(); TIMED(A_DRAW, ORIG(83, PFN_DPUP)(d, t, a, p, s)); g_drawKind[2]++; g_drawKindT[2] += qpc() - t0; return hr; }                  /* 83 */
+{ HRESULT hr; LONGLONG t0 = qpc(); TIMED(A_DRAW, ORIG(83, PFN_DPUP)(d, t, a, p, s)); g_drawKind[2]++; g_drawsSinceLock++; g_drawKindT[2] += qpc() - t0; return hr; }                  /* 83 */
 
 typedef HRESULT (STDMETHODCALLTYPE *PFN_DIPUP)(IDirect3DDevice9 *, D3DPRIMITIVETYPE, UINT, UINT, UINT, const void *,
                                                D3DFORMAT, const void *, UINT);
 static HRESULT STDMETHODCALLTYPE pk_DIPUP(IDirect3DDevice9 *d, D3DPRIMITIVETYPE t, UINT a, UINT b, UINT c,
                                           const void *i, D3DFORMAT f, const void *v, UINT s)   /* 84 */
-{ HRESULT hr; LONGLONG t0 = qpc(); TIMED(A_DRAW, ORIG(84, PFN_DIPUP)(d, t, a, b, c, i, f, v, s)); g_drawKind[3]++; g_drawKindT[3] += qpc() - t0; return hr; }
+{ HRESULT hr; LONGLONG t0 = qpc(); TIMED(A_DRAW, ORIG(84, PFN_DIPUP)(d, t, a, b, c, i, f, v, s)); g_drawKind[3]++; g_drawsSinceLock++; g_drawKindT[3] += qpc() - t0; return hr; }
 
 typedef HRESULT (STDMETHODCALLTYPE *PFN_UpdSurf)(IDirect3DDevice9 *, void *, const RECT *, void *, const POINT *);
 static HRESULT STDMETHODCALLTYPE pk_UpdSurf(IDirect3DDevice9 *d, void *a, const RECT *r, void *b, const POINT *p)
@@ -903,6 +928,89 @@ __asm__(".globl _res_thunk\n_res_thunk:\n"
         "  pushal\n  call _apply_resolution\n  popal\n"
         "  movl 0xE77B04, %edx\n  ret\n");
 
+/* ------------------------------------------------------------------ battle UI lock batching (BatchUI=1)
+ *
+ * Each battle-screen panel (bmdialogbase.cpp, FUN_004c4270) draws its 3D part, then locks the back
+ * buffer ("safe back screen", FUN_00467a90) and draws its 2D part by hand. Proteus turns each of those
+ * locks after a 3D draw into a full render-target readback (GPU sync + a frame-sized copy both ways),
+ * about 13 times per frame in battle. We queue the 2D parts while a panel group is drawn (group draw
+ * method 0x4CEAC0, pass 4) and draw them all under one lock at the end of the group, in their
+ * original order. The 3D parts are drawn as before.
+ *   0x4C4347 (23 bytes)  2D tail: if (vt[0x10](p)) { FUN_00467a90(); vt[0x14](p); }
+ *                        -> push esi / call ui_tail / jmp 0x4C435E
+ *   0x4CEAC0             group draw(pass) -> jmp ui_group_draw (same thiscall, ret 4)
+ */
+#define UI_TAIL         0x4C4347u
+#define UI_TAIL_END     0x4C435Eu
+#define UI_GROUP_DRAW   0x4CEAC0u
+#define FN_BACK_LOCK    0x467A90u      /* lock the back buffer for 2D drawing (no-op if locked) */
+#define FN_GROUP_ACTIVE 0x4C9620u      /* thiscall, returns al */
+
+typedef char (__attribute__((thiscall)) *PFN_ThisBool)(void *);
+typedef void (__attribute__((thiscall)) *PFN_ThisVoid)(void *);
+typedef void (__attribute__((thiscall)) *PFN_ThisInt)(void *, int);
+typedef void (*PFN_Void)(void);
+
+static void *g_uiQueue[256];
+static int g_uiQueued, g_uiDepth;
+
+static void ui_flush(void)
+{
+    if (!g_uiQueued) return;
+    ((PFN_Void)FN_BACK_LOCK)();
+    for (int i = 0; i < g_uiQueued; i++) {
+        void *p = g_uiQueue[i];
+        ((PFN_ThisVoid)(*(void ***)p)[0x14 / 4])(p);
+    }
+    g_uiQueued = 0;
+}
+
+static void __stdcall ui_tail(void *p)
+{
+    if (!((PFN_ThisBool)(*(void ***)p)[0x10 / 4])(p)) return;
+    if (g_uiDepth > 0 && g_uiQueued < (int)(sizeof g_uiQueue / sizeof *g_uiQueue)) {
+        g_uiQueue[g_uiQueued++] = p;
+        return;
+    }
+    ((PFN_Void)FN_BACK_LOCK)();
+    ((PFN_ThisVoid)(*(void ***)p)[0x14 / 4])(p);
+}
+
+/* replacement for the group draw method at 0x4CEAC0 (original: same loop, without the flush) */
+static void __attribute__((thiscall)) ui_group_draw(BYTE *grp, int pass)
+{
+    if (pass != 4 || !((PFN_ThisBool)FN_GROUP_ACTIVE)(grp)) return;
+    g_uiDepth++;
+    for (void **it = *(void ***)(grp + 8); it != *(void ***)(grp + 0xC); it++) {
+        void *panel = *it;
+        ((PFN_ThisInt)(*(void ***)panel)[2])(panel, 0);
+    }
+    if (--g_uiDepth == 0) ui_flush();
+}
+
+static void patch_ui_batch(void)
+{
+    static const BYTE tail_orig[23] = { 0x8B, 0x16, 0x8B, 0xCE, 0xFF, 0x52, 0x10, 0x84, 0xC0, 0x74, 0x0C, 0xE8,
+                                        0x39, 0x37, 0xFA, 0xFF, 0x8B, 0x06, 0x8B, 0xCE, 0xFF, 0x50, 0x14 };
+    static const BYTE group_orig[16] = { 0x8B, 0x44, 0x24, 0x04, 0x56, 0x57, 0x83, 0xF8, 0x04, 0x8B, 0xF9, 0x75,
+                                         0x26, 0xE8, 0x4E, 0xAB };
+    if (memcmp((void *)UI_TAIL, tail_orig, sizeof tail_orig) || memcmp((void *)UI_GROUP_DRAW, group_orig, sizeof group_orig)) {
+        logf("ui batch: code differs, not patched");
+        return;
+    }
+    BYTE tail[23];
+    memset(tail, 0x90, sizeof tail);
+    tail[0] = 0x56;                                                  /* push esi */
+    tail[1] = 0xE8;                                                  /* call ui_tail */
+    *(DWORD *)(tail + 2) = (DWORD)(UINT_PTR)ui_tail - (UI_TAIL + 6);
+    tail[6] = 0xE9;                                                  /* jmp 0x4C435E */
+    *(DWORD *)(tail + 7) = UI_TAIL_END - (UI_TAIL + 11);
+    BYTE jmp[5] = { 0xE9 };
+    *(DWORD *)(jmp + 1) = (DWORD)(UINT_PTR)ui_group_draw - (UI_GROUP_DRAW + 5);
+    int ok = patch_mem((void *)UI_TAIL, tail, sizeof tail) && patch_mem((void *)UI_GROUP_DRAW, jmp, sizeof jmp);
+    logf("ui batch: %s", ok ? "patched" : "patch failed");
+}
+
 static void patch_resolution(void)
 {
     static const BYTE orig[6] = { 0x8B, 0x15, 0x04, 0x7B, 0xE7, 0x00 };
@@ -955,6 +1063,7 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID r)
         g_switchState = (BYTE)(g_borderless != 0);
         patch_video_menu();
         patch_resolution();
+        if (g_batchUI) patch_ui_batch();
     }
     return TRUE;
 }
