@@ -444,7 +444,7 @@ Third pass, 2026-11-01, for the borderless fullscreen patch (`patches/borderless
 
 ## 11. Battle performance (2026-11-02)
 
-Measured with the proxy's profiler (`Profile=1` → `profile.log`), 16 v 16 units at max unit size, 2560×1440, RTX 4070 SUPER. The engine is single-threaded (one busy thread; multithreading is not realistic), but the main thread was ~30 % idle: frames were lost waiting on the GPU.
+Measured with the proxy's profiler (`Profile=1`, on by default → `profile.log`, restarted past 4 MB, one line per second + call-site/draw details every 10 s), 16 v 16 units at max unit size, 2560×1440, RTX 4070 SUPER. The engine is single-threaded (one busy thread; multithreading is not realistic), but the main thread was ~30 % idle: frames were lost waiting on the GPU.
 
 | ms per frame | original | + BatchUI | + FastDraw |
 |---|---|---|---|

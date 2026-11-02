@@ -28,7 +28,7 @@ ShowFPS=0      ; 1 = framerate counter at the top right (both display modes)
 FPSLimit=0     ; frame rate cap, e.g. 60 (0 = off; both display modes)
 BatchUI=1      ; 1 = battle UI panels: one back-buffer lock per panel group (report §11)
 FastDraw=1     ; 1 = DrawIndexedPrimitiveUP replayed through dynamic buffers (report §11)
-Profile=0      ; 1 = write profile.log (frame-time breakdown, diagnostics)
+Profile=1      ; 1 = write profile.log (frame-time breakdown; on by default, restarts past 4 MB)
 Log=0          ; 1 = write borderless.log
 CampaignWidth=0    ; campaign map resolution, 0 = keep the game's Video menu setting
 CampaignHeight=0

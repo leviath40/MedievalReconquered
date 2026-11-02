@@ -28,7 +28,8 @@
  *   FPSLimit=0       ; frame rate cap, e.g. 60 (0 = off; works in both display modes)
  *   FastDraw=1       ; 1 = replay DrawIndexedPrimitiveUP through our own dynamic buffers (faster)
  *   BatchUI=1        ; 1 = draw the battle UI panels' 2D parts under one back-buffer lock (faster)
- *   Profile=0        ; 1 = write profile.log: per-second breakdown of frame time (diagnostics)
+ *   Profile=1        ; 1 = write profile.log: per-second breakdown of frame time (on by default,
+ *                    ;     new file past 4 MB; 0 = off)
  *   Log=0            ; 1 = write borderless.log
  */
 #define WIN32_LEAN_AND_MEAN
@@ -59,7 +60,7 @@ static PFN_GetCursorPos g_realGetCursorPos;
 static PFN_SetCursorPos g_realSetCursorPos;
 static PFN_ClipCursor g_realClipCursor;
 
-static int g_borderless = 1, g_keepAspect = 1, g_log = 0, g_showFps = 0, g_fpsLimit = 0, g_profile = 0, g_batchUI = 1, g_fastDraw = 1;
+static int g_borderless = 1, g_keepAspect = 1, g_log = 0, g_showFps = 0, g_fpsLimit = 0, g_profile = 1, g_batchUI = 1, g_fastDraw = 1;
 static int g_campW, g_campH, g_batW, g_batH;   /* resolution overrides from the ini, 0 = off */
 static HWND g_hwnd;
 static WNDPROC g_origWndProc;
@@ -96,7 +97,7 @@ static void load_config(void)
     g_log = GetPrivateProfileIntA("Display", "Log", 0, ini);
     g_showFps = GetPrivateProfileIntA("Display", "ShowFPS", 0, ini);
     g_fpsLimit = GetPrivateProfileIntA("Display", "FPSLimit", 0, ini);
-    g_profile = GetPrivateProfileIntA("Display", "Profile", 0, ini);
+    g_profile = GetPrivateProfileIntA("Display", "Profile", 1, ini);
     g_batchUI = GetPrivateProfileIntA("Display", "BatchUI", 1, ini);
     g_fastDraw = GetPrivateProfileIntA("Display", "FastDraw", 1, ini);
     if (g_fpsLimit < 0 || g_fpsLimit > 1000) g_fpsLimit = 0;
@@ -813,10 +814,18 @@ static void prof_install(IDirect3DDevice9 *dev)
     }
     char path[MAX_PATH];
     snprintf(path, sizeof path, "%sprofile.log", g_dir);
-    FILE *f = fopen(path, "a");
+    /* always on by default: start a fresh log once it passes 4 MB (about 4 hours of play) */
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    int fresh = GetFileAttributesExA(path, GetFileExInfoStandard, &fa) && (fa.nFileSizeHigh || fa.nFileSizeLow > (4u << 20));
+    FILE *f = fopen(path, fresh ? "w" : "a");
     if (f) {
-        fprintf(f, "--- profile start. ms per frame; n = calls per frame; game = frame - measured.\n"
-                   "    buf = buffer locks per frame: dynDISCARD/dynNOOVERWRITE/dynPlain/staticDEFAULT/MANAGED/other\n");
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        fprintf(f, "--- profile start %04d-%02d-%02d %02d:%02d:%02d | Borderless=%d FPSLimit=%d BatchUI=%d FastDraw=%d\n"
+                   "    ms per frame; n = calls per frame; game = frame - measured.\n"
+                   "    buf = buffer locks per frame: dynDISCARD/dynNOOVERWRITE/dynPlain/staticDEFAULT/MANAGED/other\n",
+                st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, g_borderless, g_fpsLimit, g_batchUI,
+                g_fastDraw);
         fclose(f);
     }
 }
