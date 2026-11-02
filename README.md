@@ -6,7 +6,7 @@ patch scripts and sources; they are applied to your own install.
 ## Changes so far
 
 ### Display and launcher
-- **Borderless fullscreen** (`patches/borderless/`, a `d3d9.dll` proxy): instant alt-tab, aspect
+- **Borderless fullscreen** (`patches/d3d9_proxy/`, a `d3d9.dll` proxy): instant alt-tab, aspect
   ratio kept, mouse mapped correctly; on/off switch added to the game's Video options menu.
 - **Launcher** (`patches/launcher/`): campaign map and battle resolution (any monitor mode),
   display mode, FPS counter, 60 FPS cap.
@@ -35,3 +35,4 @@ patch scripts and sources; they are applied to your own install.
 - `tools/check_prodfiles.py`: checks unit/building production files the way the game reads them.
 - `tools/smoke_test.py`: boot test after any exe change.
 - `tools/bif.py`: reads and writes the game's `.BIF` sprite format.
+- **Code clean-up**: the `d3d9.dll` proxy (`patches/d3d9_proxy/`) split into one module per feature.

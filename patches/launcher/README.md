@@ -6,10 +6,10 @@ the display mode (Fullscreen or Borderless Fullscreen) and the FPS counter/cap, 
 ## Install / uninstall
 
 Requires [Zig](https://ziglang.org/) (`winget install zig.zig`), Python 3 and the borderless
-proxy (`patches/borderless/`), which applies the settings.
+proxy (`patches/d3d9_proxy/`), which applies the settings.
 
 ```
-python patches\borderless\build.py          # the d3d9.dll proxy (needed)
+python patches\d3d9_proxy\build.py          # the d3d9.dll proxy (needed)
 python patches\launcher\build.py            # build, install MedievalReconquered_Launcher.exe
 python patches\launcher\build.py --remove   # uninstall
 ```
@@ -28,4 +28,4 @@ embedded as resource 2.
 - **FPS counter** and **Limit to 60 FPS** checkboxes (off by default) for the proxy's framerate counter and cap.
 - **Play** writes `CampaignWidth`/`CampaignHeight`, `BattleWidth`/`BattleHeight`, `Borderless`, `ShowFPS` and `FPSLimit` (60 or 0)
   to `MedievalReconquered.ini`, then starts `MedievalReconquered.exe` and closes.
-- The proxy applies them at startup (see `patches/borderless/README.md` and report §7.3).
+- The proxy applies them at startup (see `patches/d3d9_proxy/README.md` and report §7.3).

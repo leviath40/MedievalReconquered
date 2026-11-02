@@ -3,7 +3,7 @@
  *
  * Writes [Display] CampaignWidth/Height, BattleWidth/Height, Borderless, ShowFPS and FPSLimit in
  * MedievalReconquered.ini (next to this exe) and starts MedievalReconquered.exe. The d3d9.dll
- * proxy (patches/borderless) reads them at startup: Borderless selects borderless or exclusive
+ * proxy (patches/d3d9_proxy) reads them at startup: Borderless selects borderless or exclusive
  * fullscreen, the sizes override the campaign and battle resolutions of the game's Video menu
  * (0: keep the game's setting).
  *

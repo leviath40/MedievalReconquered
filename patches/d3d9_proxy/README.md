@@ -1,16 +1,24 @@
-# Borderless fullscreen
+# d3d9.dll proxy
 
-Adds borderless fullscreen to Medieval: Total War, with an on/off switch in the in-game
-**Options → Video** menu. The exe is not modified: a `d3d9.dll` proxy in the game folder does
-everything in memory at load time.
+A `d3d9.dll` in the game folder that sits between the game and Direct3D 9. The exe is not modified:
+everything is done in memory at load time. Features:
+
+- borderless fullscreen, with an on/off switch in the in-game **Options → Video** menu;
+- campaign/battle resolution override (set by the launcher);
+- FPS counter and frame rate cap;
+- battle performance fixes (`BatchUI`, `FastDraw`, report §11) and an always-on profiler (`profile.log`);
+- smooth shader upscaling of the 800x600 menus, with the menu logo drawn at full resolution.
+
+Source: one file per feature (`proxy.c` core, `fps.c`, `profile.c`, `fastdraw.c`, `upscale.c`,
+`game_patches.c`, shared `proxy.h`); the overview comment at the top of `proxy.c` lists them.
 
 ## Install / uninstall
 
 Requires [Zig](https://ziglang.org/) (`winget install zig.zig`) and Python 3.
 
 ```
-python patches\borderless\build.py            # build, install d3d9.dll, set the menu text
-python patches\borderless\build.py --remove   # uninstall, restore the menu text
+python patches\d3d9_proxy\build.py            # build, install d3d9.dll, set the menu text
+python patches\d3d9_proxy\build.py --remove   # uninstall, restore the menu text
 python tools\smoke_test.py                    # check the game still boots
 ```
 

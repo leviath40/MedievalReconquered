@@ -1,0 +1,5 @@
+# Store text with LF and keep LF in the working tree (silences the LF/CRLF warnings).
+* text=auto eol=lf
+*.png binary
+*.ico binary
+*.bmp binary

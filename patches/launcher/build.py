@@ -4,7 +4,7 @@
     python patches\\launcher\\build.py --remove   # uninstall
 
 The launcher writes Width/Height/Borderless in MedievalReconquered.ini; the d3d9.dll proxy
-(patches/borderless) applies them, so install that too.
+(patches/d3d9_proxy) applies them, so install that too.
 """
 import subprocess
 import sys
