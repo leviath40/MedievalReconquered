@@ -30,6 +30,6 @@
 /analysis/decompiled/
 __pycache__/
 *.pyc
-#    - build output (compiled from our sources, rebuilt with patches/borderless/build.py)
+#    - build output (compiled from our sources, rebuilt with patches/d3d9_proxy/build.py)
 patches/**/build/
 *.dll

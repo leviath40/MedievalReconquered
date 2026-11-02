@@ -1,7 +1,7 @@
-"""Build the borderless d3d9.dll proxy with Zig and install it in the game folder.
+"""Build the d3d9.dll proxy with Zig and install it in the game folder.
 
-    python patches\\borderless\\build.py            # build + install d3d9.dll, create the ini if missing
-    python patches\\borderless\\build.py --remove   # uninstall (delete d3d9.dll from the game folder)
+    python patches\\d3d9_proxy\\build.py            # build + install d3d9.dll, create the ini if missing
+    python patches\\d3d9_proxy\\build.py --remove   # uninstall (delete d3d9.dll from the game folder)
 """
 import glob
 import os
@@ -66,7 +66,8 @@ def main():
         return
     OUT.parent.mkdir(exist_ok=True)
     cmd = [find_zig(), "cc", "-target", "x86-windows-gnu", "-shared", "-O2", "-s",
-           "-o", str(OUT), str(HERE / "d3d9_proxy.c"), str(HERE / "d3d9.def"), "-luser32", "-lgdi32", "-lwinmm"]
+           "-o", str(OUT), *(str(c) for c in sorted(HERE.glob("*.c"))), str(HERE / "d3d9.def"),
+           "-luser32", "-lgdi32", "-lwinmm"]
     subprocess.run(cmd, check=True)
     shutil.copy2(OUT, target)
     print(f"installed {target}")

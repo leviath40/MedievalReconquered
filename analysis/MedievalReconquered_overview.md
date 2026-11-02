@@ -395,7 +395,7 @@ There are 23 direct call/jmp sites in the original `.text`, and no data pointers
 
 ## 7. Display mode and the Video options menu
 
-Third pass, 2026-11-01, for the borderless fullscreen patch (`patches/borderless/`).
+Third pass, 2026-11-01, for the borderless fullscreen patch (`patches/d3d9_proxy/`).
 
 ### 7.1 Window and device **[confirmed]**
 

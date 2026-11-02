@@ -9,8 +9,8 @@ everything in memory at load time.
 Requires [Zig](https://ziglang.org/) (`winget install zig.zig`) and Python 3.
 
 ```
-python patches\borderless\build.py            # build, install d3d9.dll, set the menu text
-python patches\borderless\build.py --remove   # uninstall, restore the menu text
+python patches\d3d9_proxy\build.py            # build, install d3d9.dll, set the menu text
+python patches\d3d9_proxy\build.py --remove   # uninstall, restore the menu text
 python tools\smoke_test.py                    # check the game still boots
 ```
 
