@@ -25,7 +25,6 @@ embedded as resource 2.
 - The scroll banner at the top of that parchment is painted over in memory at load time (parchment
   copied from below, with the edge darkening measured beside the banner), freeing room for the controls.
 - Lists the monitor's display modes (800×600 and up) plus "Game setting (Video menu)".
-- **Menu upscaling**: Original (plain stretch), Sharp or Smooth (default) (`Upscale` 0/1/2, borderless only).
 - **FPS counter** and **Limit to 60 FPS** checkboxes (off by default) for the proxy's framerate counter and cap.
 - **Play** writes `CampaignWidth`/`CampaignHeight`, `BattleWidth`/`BattleHeight`, `Borderless`, `ShowFPS` and `FPSLimit` (60 or 0)
   to `MedievalReconquered.ini`, then starts `MedievalReconquered.exe` and closes.

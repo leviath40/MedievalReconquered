@@ -1,7 +1,7 @@
 /*
  * Medieval Reconquered launcher: pick the resolution and the display mode, then start the game.
  *
- * Writes [Display] CampaignWidth/Height, BattleWidth/Height, Borderless, Upscale, ShowFPS and FPSLimit in
+ * Writes [Display] CampaignWidth/Height, BattleWidth/Height, Borderless, ShowFPS and FPSLimit in
  * MedievalReconquered.ini (next to this exe) and starts MedievalReconquered.exe. The d3d9.dll
  * proxy (patches/borderless) reads them at startup: Borderless selects borderless or exclusive
  * fullscreen, the sizes override the campaign and battle resolutions of the game's Video menu
@@ -28,13 +28,12 @@
 #define ID_QUIT  104
 #define ID_FPS   105
 #define ID_LIMIT 106
-#define ID_UP    107
 
 typedef struct { int w, h; } Mode;
 static Mode g_modes[128];
 static int g_nModes;
 static char g_dir[MAX_PATH], g_ini[MAX_PATH];
-static HWND g_camp, g_res, g_mode, g_up, g_fps, g_limit;    /* g_res: battle resolution */
+static HWND g_camp, g_res, g_mode, g_fps, g_limit;    /* g_res: battle resolution */
 static BYTE *g_bgBits;                /* 24-bit bottom-up pixels, DIB layout */
 static BITMAPINFO g_bgInfo;
 static HFONT g_labelFont;
@@ -157,11 +156,10 @@ static void paint(HWND win)
         text_at(dc, "Medieval Reconquered", 0, 104, CLIENT_W, 36, DT_CENTER);
     }
     text_at(dc, "Campaign map:", 100, 180, 130, 24, DT_LEFT);
-    text_at(dc, "Battle:", 100, 206, 130, 24, DT_LEFT);
-    text_at(dc, "Display mode:", 100, 232, 130, 24, DT_LEFT);
-    text_at(dc, "Menu upscaling:", 100, 258, 140, 24, DT_LEFT);
-    text_at(dc, "FPS counter:", 100, 284, 130, 24, DT_LEFT);
-    text_at(dc, "Limit to 60 FPS:", 100, 310, 140, 24, DT_LEFT);
+    text_at(dc, "Battle:", 100, 207, 130, 24, DT_LEFT);
+    text_at(dc, "Display mode:", 100, 234, 130, 24, DT_LEFT);
+    text_at(dc, "FPS counter:", 100, 261, 130, 24, DT_LEFT);
+    text_at(dc, "Limit to 60 FPS:", 100, 288, 140, 24, DT_LEFT);
     SelectObject(dc, oldFont);
     BitBlt(wdc, 0, 0, CLIENT_W, CLIENT_H, dc, 0, 0, SRCCOPY);
     SelectObject(dc, oldBmp);
@@ -232,11 +230,6 @@ static void fill_controls(void)
     SendMessageA(g_mode, CB_ADDSTRING, 0, (LPARAM)"Fullscreen");
     SendMessageA(g_mode, CB_ADDSTRING, 0, (LPARAM)"Borderless Fullscreen");
     SendMessageA(g_mode, CB_SETCURSEL, GetPrivateProfileIntA("Display", "Borderless", 1, g_ini) ? 1 : 0, 0);
-    SendMessageA(g_up, CB_ADDSTRING, 0, (LPARAM)"Original (plain stretch)");
-    SendMessageA(g_up, CB_ADDSTRING, 0, (LPARAM)"Sharp");
-    SendMessageA(g_up, CB_ADDSTRING, 0, (LPARAM)"Smooth");
-    int up = GetPrivateProfileIntA("Display", "Upscale", 2, g_ini);
-    SendMessageA(g_up, CB_SETCURSEL, up >= 0 && up <= 2 ? up : 2, 0);
     SendMessageA(g_fps, BM_SETCHECK, GetPrivateProfileIntA("Display", "ShowFPS", 0, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageA(g_limit, BM_SETCHECK, GetPrivateProfileIntA("Display", "FPSLimit", 0, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
 }
@@ -245,9 +238,6 @@ static int save_and_play(HWND win)
 {
     save_res(g_camp, "CampaignWidth", "CampaignHeight");
     save_res(g_res, "BattleWidth", "BattleHeight");
-    char up[8];
-    snprintf(up, sizeof up, "%d", (int)SendMessageA(g_up, CB_GETCURSEL, 0, 0));
-    WritePrivateProfileStringA("Display", "Upscale", up, g_ini);
     WritePrivateProfileStringA("Display", "Borderless",
                                SendMessageA(g_mode, CB_GETCURSEL, 0, 0) == 1 ? "1" : "0", g_ini);
     WritePrivateProfileStringA("Display", "ShowFPS",
@@ -275,13 +265,12 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     switch (msg) {
     case WM_CREATE:
         g_camp = add(h, "COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 240, 181, 180, 300, ID_CAMP);
-        g_res = add(h, "COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 240, 207, 180, 300, ID_RES);
-        g_mode = add(h, "COMBOBOX", "", CBS_DROPDOWNLIST | WS_TABSTOP, 240, 233, 180, 100, ID_MODE);
-        g_up = add(h, "COMBOBOX", "", CBS_DROPDOWNLIST | WS_TABSTOP, 240, 259, 180, 100, ID_UP);
-        g_fps = add(h, "BUTTON", "", BS_AUTOCHECKBOX | WS_TABSTOP, 240, 288, 16, 16, ID_FPS);
-        g_limit = add(h, "BUTTON", "", BS_AUTOCHECKBOX | WS_TABSTOP, 240, 314, 16, 16, ID_LIMIT);
-        add(h, "BUTTON", "Play", BS_DEFPUSHBUTTON | WS_TABSTOP, 150, 340, 100, 30, ID_PLAY);
-        add(h, "BUTTON", "Quit", WS_TABSTOP, 270, 340, 100, 30, ID_QUIT);
+        g_res = add(h, "COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 240, 208, 180, 300, ID_RES);
+        g_mode = add(h, "COMBOBOX", "", CBS_DROPDOWNLIST | WS_TABSTOP, 240, 235, 180, 100, ID_MODE);
+        g_fps = add(h, "BUTTON", "", BS_AUTOCHECKBOX | WS_TABSTOP, 240, 265, 16, 16, ID_FPS);
+        g_limit = add(h, "BUTTON", "", BS_AUTOCHECKBOX | WS_TABSTOP, 240, 292, 16, 16, ID_LIMIT);
+        add(h, "BUTTON", "Play", BS_DEFPUSHBUTTON | WS_TABSTOP, 150, 318, 100, 30, ID_PLAY);
+        add(h, "BUTTON", "Quit", WS_TABSTOP, 270, 318, 100, 30, ID_QUIT);
         fill_controls();
         return 0;
     case WM_ERASEBKGND:
