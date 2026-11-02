@@ -385,10 +385,10 @@ There are 23 direct call/jmp sites in the original `.text`, and no data pointers
 2. **Unit-size scaling:** follow the readers of `+0x344` (base_unitsize) and the `unitsize_scalable` handler (0x733C00). Find the Small/Normal/Large/Huge multipliers stored in `Medieval.Cfg`.
 3. **Faction cap:** confirm that the 96-dword array at 0xF31FB8 is indexed by faction id × period, and look for other arrays sized 32 / 0x20 (rendering colours, banners, AI personalities).
 4. **Province cap:** inspect `cregion.cpp` / `startpos.cpp` code. `startpos.cpp` checks a keyword with id 0x49 and compares a value against **0x32 (50)** in `FUN_00642140`; check whether that is a region or neighbour limit.
-6. ~~Proteus layer~~: done, see section 5.
-6b. **Region-dependent fixed arrays:** the region array itself is dynamic (section 4). Check bitsets and arrays indexed by region id (AI, trade, `startpos.cpp` value 0x32) for a hidden cap.
-7. **Config transform** `FUN_00409010` / flag `DAT_0079c8e8`: is it encryption, or a no-op?
-8. **Unit-column error message:** the inverted text (3.3 step 1) is a known-quirk candidate for modding documentation.
+5. **Region-dependent fixed arrays:** the region array itself is dynamic (section 4). Check bitsets and arrays indexed by region id (AI, trade, `startpos.cpp` value 0x32) for a hidden cap.
+6. **Config transform** `FUN_00409010` / flag `DAT_0079c8e8`: is it encryption, or a no-op? It runs on files read whole by `FUN_004090a0` (`.bif` and one other extension) when the flag is set; shipped files load without it.
+7. **Unit-column error message:** the inverted text (3.3 step 1) is a known-quirk candidate for modding documentation.
+8. **Battle back-buffer locks:** 5 per frame remain (~4 ms at 1440p, section 11), from different HUD parts with 3D in between. Removing them needs all hand-drawn 2D redirected to an overlay composited at the end of the frame; only safe if none of it reads the back buffer.
 9. **Evidence:** keep `analysis/decompiled/*.c` with this report. The Ghidra session was ephemeral, so there is no saved project; re-running `open_binary` repeats the full auto-analysis.
 
 ---
