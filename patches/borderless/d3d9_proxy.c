@@ -26,6 +26,7 @@
  *   BattleHeight=0
  *   ShowFPS=0        ; 1 = framerate counter at the top right (works in both display modes)
  *   FPSLimit=0       ; frame rate cap, e.g. 60 (0 = off; works in both display modes)
+ *   FastDraw=1       ; 1 = replay DrawIndexedPrimitiveUP through our own dynamic buffers (faster)
  *   BatchUI=1        ; 1 = draw the battle UI panels' 2D parts under one back-buffer lock (faster)
  *   Profile=0        ; 1 = write profile.log: per-second breakdown of frame time (diagnostics)
  *   Log=0            ; 1 = write borderless.log
@@ -58,7 +59,7 @@ static PFN_GetCursorPos g_realGetCursorPos;
 static PFN_SetCursorPos g_realSetCursorPos;
 static PFN_ClipCursor g_realClipCursor;
 
-static int g_borderless = 1, g_keepAspect = 1, g_log = 0, g_showFps = 0, g_fpsLimit = 0, g_profile = 0, g_batchUI = 1;
+static int g_borderless = 1, g_keepAspect = 1, g_log = 0, g_showFps = 0, g_fpsLimit = 0, g_profile = 0, g_batchUI = 1, g_fastDraw = 1;
 static int g_campW, g_campH, g_batW, g_batH;   /* resolution overrides from the ini, 0 = off */
 static HWND g_hwnd;
 static WNDPROC g_origWndProc;
@@ -97,6 +98,7 @@ static void load_config(void)
     g_fpsLimit = GetPrivateProfileIntA("Display", "FPSLimit", 0, ini);
     g_profile = GetPrivateProfileIntA("Display", "Profile", 0, ini);
     g_batchUI = GetPrivateProfileIntA("Display", "BatchUI", 1, ini);
+    g_fastDraw = GetPrivateProfileIntA("Display", "FastDraw", 1, ini);
     if (g_fpsLimit < 0 || g_fpsLimit > 1000) g_fpsLimit = 0;
     g_campW = GetPrivateProfileIntA("Display", "CampaignWidth", 0, ini);
     g_campH = GetPrivateProfileIntA("Display", "CampaignHeight", 0, ini);
@@ -282,8 +284,124 @@ static void make_windowed(D3DPRESENT_PARAMETERS *pp)
     fit_window();
 }
 
+/* ------------------------------------------------------------------ fast indexed draws (FastDraw=1)
+ *
+ * Proteus draws most battle geometry with DrawIndexedPrimitiveUP (data passed from memory). On
+ * current drivers each such call costs ~25 us even for ~70 vertices, about 15x a DrawPrimitiveUP of the
+ * same size. We copy the vertices and indices into our own dynamic buffers (ring buffers: NOOVERWRITE
+ * while there is room, DISCARD when wrapping, so the CPU never waits for the GPU) and issue a normal
+ * DrawIndexedPrimitive. Afterwards stream 0 and the index buffer are set to NULL, which is the state
+ * DrawIndexedPrimitiveUP leaves behind. The buffers are D3DPOOL_DEFAULT: released before Reset and
+ * recreated on the next draw.
+ */
+#define FD_VB_SIZE (8u << 20)
+#define FD_IB_SIZE (2u << 20)
+
+typedef HRESULT (STDMETHODCALLTYPE *PFN_DIPUP_)(IDirect3DDevice9 *, D3DPRIMITIVETYPE, UINT, UINT, UINT, const void *,
+                                                D3DFORMAT, const void *, UINT);
+static PFN_DIPUP_ g_fdOrigDIPUP;
+static IDirect3DVertexBuffer9 *g_fdVb;
+static IDirect3DIndexBuffer9 *g_fdIb[2];          /* 16-bit, 32-bit indices */
+static UINT g_fdVbPos, g_fdIbPos[2];
+static int g_fdFailed;                            /* buffer creation failed: stay on the original path */
+
+static void fd_release(void)
+{
+    if (g_fdVb) { IDirect3DVertexBuffer9_Release(g_fdVb); g_fdVb = NULL; }
+    for (int i = 0; i < 2; i++)
+        if (g_fdIb[i]) { IDirect3DIndexBuffer9_Release(g_fdIb[i]); g_fdIb[i] = NULL; }
+    g_fdVbPos = g_fdIbPos[0] = g_fdIbPos[1] = 0;
+}
+
+static UINT fd_index_count(D3DPRIMITIVETYPE t, UINT prims)
+{
+    switch (t) {
+    case D3DPT_TRIANGLELIST:  return prims * 3;
+    case D3DPT_TRIANGLESTRIP:
+    case D3DPT_TRIANGLEFAN:   return prims + 2;
+    case D3DPT_LINELIST:      return prims * 2;
+    case D3DPT_LINESTRIP:     return prims + 1;
+    case D3DPT_POINTLIST:     return prims;
+    default:                  return 0;
+    }
+}
+
+static int fd_ensure(IDirect3DDevice9 *dev, int i32)
+{
+    if (g_fdFailed) return 0;
+    DWORD usage = D3DUSAGE_DYNAMIC | D3DUSAGE_WRITEONLY;
+    D3DDEVICE_CREATION_PARAMETERS cp;
+    if (SUCCEEDED(IDirect3DDevice9_GetCreationParameters(dev, &cp)) &&
+        (cp.BehaviorFlags & (D3DCREATE_SOFTWARE_VERTEXPROCESSING | D3DCREATE_MIXED_VERTEXPROCESSING)))
+        usage |= D3DUSAGE_SOFTWAREPROCESSING;
+    if (!g_fdVb && FAILED(IDirect3DDevice9_CreateVertexBuffer(dev, FD_VB_SIZE, usage, 0, D3DPOOL_DEFAULT, &g_fdVb, NULL))) {
+        g_fdVb = NULL;
+        g_fdFailed = 1;
+        logf("fastdraw: vertex buffer creation failed, using the original draws");
+        return 0;
+    }
+    if (!g_fdIb[i32] && FAILED(IDirect3DDevice9_CreateIndexBuffer(dev, FD_IB_SIZE, usage,
+                                                                  i32 ? D3DFMT_INDEX32 : D3DFMT_INDEX16,
+                                                                  D3DPOOL_DEFAULT, &g_fdIb[i32], NULL))) {
+        g_fdIb[i32] = NULL;
+        g_fdFailed = 1;
+        logf("fastdraw: index buffer creation failed, using the original draws");
+        return 0;
+    }
+    return 1;
+}
+
+static HRESULT STDMETHODCALLTYPE fd_DIPUP(IDirect3DDevice9 *dev, D3DPRIMITIVETYPE type, UINT minIdx, UINT numV,
+                                          UINT prims, const void *idata, D3DFORMAT ifmt, const void *vdata,
+                                          UINT stride)
+{
+    int i32 = ifmt == D3DFMT_INDEX32;
+    UINT isz = i32 ? 4 : 2, nidx = fd_index_count(type, prims);
+    UINT vbytes = numV * stride, ibytes = nidx * isz;
+    if (!idata || !vdata || !stride || !numV || !nidx || (ifmt != D3DFMT_INDEX16 && !i32) ||
+        vbytes > FD_VB_SIZE / 4 || ibytes > FD_IB_SIZE / 4 || !fd_ensure(dev, i32))
+        return g_fdOrigDIPUP(dev, type, minIdx, numV, prims, idata, ifmt, vdata, stride);
+
+    void *p;
+    UINT voff = (g_fdVbPos + stride - 1) / stride * stride;
+    DWORD vflag = D3DLOCK_NOOVERWRITE;
+    if (voff + vbytes > FD_VB_SIZE) { voff = 0; vflag = D3DLOCK_DISCARD; }
+    if (FAILED(IDirect3DVertexBuffer9_Lock(g_fdVb, voff, vbytes, &p, vflag)))
+        return g_fdOrigDIPUP(dev, type, minIdx, numV, prims, idata, ifmt, vdata, stride);
+    memcpy(p, (const BYTE *)vdata + (size_t)minIdx * stride, vbytes);
+    IDirect3DVertexBuffer9_Unlock(g_fdVb);
+    g_fdVbPos = voff + vbytes;
+
+    UINT ioff = (g_fdIbPos[i32] + isz - 1) / isz * isz;
+    DWORD iflag = D3DLOCK_NOOVERWRITE;
+    if (ioff + ibytes > FD_IB_SIZE) { ioff = 0; iflag = D3DLOCK_DISCARD; }
+    if (FAILED(IDirect3DIndexBuffer9_Lock(g_fdIb[i32], ioff, ibytes, &p, iflag)))
+        return g_fdOrigDIPUP(dev, type, minIdx, numV, prims, idata, ifmt, vdata, stride);
+    memcpy(p, idata, ibytes);
+    IDirect3DIndexBuffer9_Unlock(g_fdIb[i32]);
+    g_fdIbPos[i32] = ioff + ibytes;
+
+    IDirect3DDevice9_SetStreamSource(dev, 0, g_fdVb, 0, stride);
+    IDirect3DDevice9_SetIndices(dev, g_fdIb[i32]);
+    HRESULT hr = IDirect3DDevice9_DrawIndexedPrimitive(dev, type, (INT)(voff / stride) - (INT)minIdx, minIdx, numV,
+                                                       ioff / isz, prims);
+    IDirect3DDevice9_SetStreamSource(dev, 0, NULL, 0, 0);
+    IDirect3DDevice9_SetIndices(dev, NULL);
+    return hr;
+}
+
+static void fd_install(IDirect3DDevice9 *dev)
+{
+    if (!g_fastDraw || g_fdOrigDIPUP) return;
+    void **vt = *(void ***)dev;
+    g_fdOrigDIPUP = (PFN_DIPUP_)vt[84];
+    patch_ptr(&vt[84], (void *)fd_DIPUP);
+    logf("fastdraw: DrawIndexedPrimitiveUP redirected");
+}
+
 static HRESULT STDMETHODCALLTYPE hk_Reset(IDirect3DDevice9 *dev, D3DPRESENT_PARAMETERS *pp)
 {
+    fd_release();                 /* our D3DPOOL_DEFAULT buffers must go before Reset */
     if (!g_borderless) return g_origReset(dev, pp);
     D3DPRESENT_PARAMETERS mine = *pp;
     make_windowed(&mine);
@@ -481,6 +599,8 @@ typedef struct { void *caller, *g[5]; D3DSURFACE_DESC d; DWORD flags; LONG rw, r
 static unsigned g_drawsSinceLock;
 static SiteStat g_sites[64];
 static unsigned g_drawKind[4];
+static double g_dipupVerts, g_dipupPrims, g_dipupBytes, g_dipupIdx; /* DIPUP sums over the dump period */
+static unsigned g_dipupHist[8];   /* NumVertices buckets: <64 <256 <1k <4k <16k <64k more */
 static LONGLONG g_drawKindT[4];
 
 /* Is a a plausible return address in the game's original code (preceded by a call instruction)? */
@@ -539,6 +659,13 @@ static void sites_dump(FILE *f)
     fprintf(f, "  draws, last 10 s (DP/DIP/DPUP/DIPUP: calls, total ms): %u %.0f / %u %.0f / %u %.0f / %u %.0f\n",
             g_drawKind[0], (double)g_drawKindT[0] * ms, g_drawKind[1], (double)g_drawKindT[1] * ms,
             g_drawKind[2], (double)g_drawKindT[2] * ms, g_drawKind[3], (double)g_drawKindT[3] * ms);
+    if (g_drawKind[3])
+        fprintf(f, "  DIPUP per call: verts %.0f prims %.0f bytes %.0f | NumVertices <64/<256/<1k/<4k/<16k/<64k/more: "
+                   "%u %u %u %u %u %u %u\n", g_dipupVerts / g_drawKind[3], g_dipupPrims / g_drawKind[3],
+                g_dipupBytes / g_drawKind[3], g_dipupHist[0], g_dipupHist[1], g_dipupHist[2], g_dipupHist[3],
+                g_dipupHist[4], g_dipupHist[5], g_dipupHist[6] + g_dipupHist[7]);
+    g_dipupVerts = g_dipupPrims = g_dipupBytes = g_dipupIdx = 0;
+    memset(g_dipupHist, 0, sizeof g_dipupHist);
     memset(g_drawKind, 0, sizeof g_drawKind);
     memset(g_drawKindT, 0, sizeof g_drawKindT);
 }
@@ -588,7 +715,10 @@ typedef HRESULT (STDMETHODCALLTYPE *PFN_DIPUP)(IDirect3DDevice9 *, D3DPRIMITIVET
                                                D3DFORMAT, const void *, UINT);
 static HRESULT STDMETHODCALLTYPE pk_DIPUP(IDirect3DDevice9 *d, D3DPRIMITIVETYPE t, UINT a, UINT b, UINT c,
                                           const void *i, D3DFORMAT f, const void *v, UINT s)   /* 84 */
-{ HRESULT hr; LONGLONG t0 = qpc(); TIMED(A_DRAW, ORIG(84, PFN_DIPUP)(d, t, a, b, c, i, f, v, s)); g_drawKind[3]++; g_drawsSinceLock++; g_drawKindT[3] += qpc() - t0; return hr; }
+{ HRESULT hr; LONGLONG t0 = qpc();
+  g_dipupVerts += b; g_dipupPrims += c; g_dipupBytes += (double)b * s; g_dipupIdx += i ? 1 : 0;
+  { int k = 0; for (UINT x = b; x >= 64 && k < 7; x >>= 2) k++; g_dipupHist[k]++; }
+  TIMED(A_DRAW, ORIG(84, PFN_DIPUP)(d, t, a, b, c, i, f, v, s)); g_drawKind[3]++; g_drawsSinceLock++; g_drawKindT[3] += qpc() - t0; return hr; }
 
 typedef HRESULT (STDMETHODCALLTYPE *PFN_UpdSurf)(IDirect3DDevice9 *, void *, const RECT *, void *, const POINT *);
 static HRESULT STDMETHODCALLTYPE pk_UpdSurf(IDirect3DDevice9 *d, void *a, const RECT *r, void *b, const POINT *p)
@@ -768,7 +898,10 @@ static HRESULT STDMETHODCALLTYPE hk_CreateDevice(IDirect3D9 *d3d, UINT adapter, 
             patch_ptr(&vt[16], (void *)hk_Reset);
             patch_ptr(&vt[17], (void *)hk_Present);
         }
-        if (SUCCEEDED(hr0) && *out) prof_install(*out);
+        if (SUCCEEDED(hr0) && *out) {
+            fd_install(*out);
+            prof_install(*out);
+        }
         return hr0;
     }
     g_hwnd = focus;
@@ -791,6 +924,7 @@ static HRESULT STDMETHODCALLTYPE hk_CreateDevice(IDirect3D9 *d3d, UINT adapter, 
             patch_ptr(&vt[16], (void *)hk_Reset);
             patch_ptr(&vt[17], (void *)hk_Present);
         }
+        fd_install(*out);
         prof_install(*out);
         install_hooks();
     }
@@ -1043,7 +1177,7 @@ IDirect3D9 *WINAPI Direct3DCreate9(UINT sdk)
     load_real();
     if (!g_realCreate9) return NULL;
     IDirect3D9 *d3d = g_realCreate9(sdk);
-    if (d3d && (g_borderless || g_showFps || g_fpsLimit || g_profile) && !g_origCreateDevice) {
+    if (d3d && (g_borderless || g_showFps || g_fpsLimit || g_profile || g_fastDraw) && !g_origCreateDevice) {
         void **vt = *(void ***)d3d;
         g_origCreateDevice = (PFN_CreateDevice)vt[16];
         patch_ptr(&vt[16], (void *)hk_CreateDevice);
