@@ -422,6 +422,11 @@ Third pass, 2026-11-01, for the borderless fullscreen patch (`patches/borderless
 - 0x6DE4BE–0x6DE565: clamps the cfg indices to the counts (copies in 0xE7D1F0 battle / 0xE7D1F4 campaign) and writes width/height into 0x7A2780/0x7A2788. `FUN_006de850(dev, w, h, battle)` snaps a size to the closest listed mode. The Video menu sliders write the same globals (0x70CC52, 0x70CE21).
 - The borderless proxy hooks 0x6DE4BE (`mov edx,[0xE77B04]`, 6 bytes → call + nop) to write the indices matching `CampaignWidth/Height` and `BattleWidth/Height` from the ini, once at startup. Play-tested.
 
+### 7.4 FPS counter and cap (2026-11-02)
+
+- `ShowFPS=1` makes the proxy hook `IDirect3DDevice9::Present` (also in exclusive mode, where it changes nothing else) and draw the framerate (averaged over 0.5 s) at the top right of the back buffer with `ColorFill` rects from a built-in 5×7 font. `ColorFill` ignores render state, viewport and render target, so the game's state is untouched. With `KeepAspect=1` it sits at the top right of the game image, not the monitor. Launcher checkbox: "FPS counter".
+- `FPSLimit=N` (launcher "Limit to 60 FPS" writes 60) waits in the same `Present` hook until 1/N s after the previous frame's deadline (`Sleep` with `timeBeginPeriod(1)`, then a short spin). Tested: menu at 60 FPS on a 165 Hz monitor, low CPU.
+
 ## 8. Boot intro **[confirmed]** (2026-11-02)
 
 - `FUN_006be3e0` (`credits.cpp`, called once at 0x6D5931) plays the boot sequence: `Credits\Legals\TotalWar.Mpg`, then `Credits\Legals\intro.mpg` (another TotalWar.Mpg branch when `[esp+0x14] == 5`), then the `Legals.Bp8` screen. Movies: `new` object, constructor 0x417B70(path), frame loop on 0x417D10 until it returns false or the skip flag `[0x8DCD11]` is set.

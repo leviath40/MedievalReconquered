@@ -24,13 +24,17 @@
  *   CampaignHeight=0
  *   BattleWidth=0    ; battle resolution, 0 = use the game's setting
  *   BattleHeight=0
+ *   ShowFPS=0        ; 1 = framerate counter at the top right (works in both display modes)
+ *   FPSLimit=0       ; frame rate cap, e.g. 60 (0 = off; works in both display modes)
  *   Log=0            ; 1 = write borderless.log
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#define COBJMACROS
 #include <d3d9.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <mmsystem.h>
 
 typedef IDirect3D9 *(WINAPI *PFN_Create9)(UINT);
 typedef HRESULT (STDMETHODCALLTYPE *PFN_CreateDevice)(IDirect3D9 *, UINT, D3DDEVTYPE, HWND, DWORD,
@@ -51,7 +55,7 @@ static PFN_GetCursorPos g_realGetCursorPos;
 static PFN_SetCursorPos g_realSetCursorPos;
 static PFN_ClipCursor g_realClipCursor;
 
-static int g_borderless = 1, g_keepAspect = 1, g_log = 0;
+static int g_borderless = 1, g_keepAspect = 1, g_log = 0, g_showFps = 0, g_fpsLimit = 0;
 static int g_campW, g_campH, g_batW, g_batH;   /* resolution overrides from the ini, 0 = off */
 static HWND g_hwnd;
 static WNDPROC g_origWndProc;
@@ -86,6 +90,9 @@ static void load_config(void)
     g_borderless = GetPrivateProfileIntA("Display", "Borderless", 1, ini);
     g_keepAspect = GetPrivateProfileIntA("Display", "KeepAspect", 1, ini);
     g_log = GetPrivateProfileIntA("Display", "Log", 0, ini);
+    g_showFps = GetPrivateProfileIntA("Display", "ShowFPS", 0, ini);
+    g_fpsLimit = GetPrivateProfileIntA("Display", "FPSLimit", 0, ini);
+    if (g_fpsLimit < 0 || g_fpsLimit > 1000) g_fpsLimit = 0;
     g_campW = GetPrivateProfileIntA("Display", "CampaignWidth", 0, ini);
     g_campH = GetPrivateProfileIntA("Display", "CampaignHeight", 0, ini);
     g_batW = GetPrivateProfileIntA("Display", "BattleWidth", 0, ini);
@@ -272,6 +279,7 @@ static void make_windowed(D3DPRESENT_PARAMETERS *pp)
 
 static HRESULT STDMETHODCALLTYPE hk_Reset(IDirect3DDevice9 *dev, D3DPRESENT_PARAMETERS *pp)
 {
+    if (!g_borderless) return g_origReset(dev, pp);
     D3DPRESENT_PARAMETERS mine = *pp;
     make_windowed(&mine);
     HRESULT hr = g_origReset(dev, &mine);
@@ -285,10 +293,99 @@ static HRESULT STDMETHODCALLTYPE hk_Reset(IDirect3DDevice9 *dev, D3DPRESENT_PARA
     return hr;
 }
 
+/* ------------------------------------------------------------------ FPS counter
+ *
+ * Drawn on the back buffer just before Present with ColorFill (one call per horizontal run of
+ * font pixels). ColorFill ignores render states, viewport, scissor and the current render target,
+ * so the game's state is never touched (also safe on a pure device).
+ */
+static const BYTE g_font[][7] = {   /* 5x7, bit 4 = leftmost column */
+    {14,17,19,21,25,17,14}, {4,12,4,4,4,4,14}, {14,17,1,2,4,8,31}, {31,2,4,2,1,17,14},
+    {2,6,10,18,31,2,2}, {31,16,30,1,1,17,14}, {6,8,16,30,17,17,14}, {31,1,2,4,8,8,8},
+    {14,17,17,14,17,17,14}, {14,17,17,15,1,2,12},
+    {31,16,16,30,16,16,16} /* F */, {30,17,17,30,16,16,16} /* P */, {15,16,16,14,1,1,30} /* S */,
+    {0,0,0,0,0,0,0} /* space */,
+};
+
+static int glyph(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    return c == 'F' ? 10 : c == 'P' ? 11 : c == 'S' ? 12 : 13;
+}
+
+static void draw_fps(IDirect3DDevice9 *dev)
+{
+    static LARGE_INTEGER freq, last;
+    static int frames, fps = -1;
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    if (!freq.QuadPart) { QueryPerformanceFrequency(&freq); last = now; }
+    frames++;
+    double dt = (double)(now.QuadPart - last.QuadPart) / (double)freq.QuadPart;
+    if (dt >= 0.5) { fps = (int)(frames / dt + 0.5); frames = 0; last = now; }
+    if (fps < 0) return;
+
+    IDirect3DSurface9 *bb = NULL;
+    if (FAILED(IDirect3DDevice9_GetBackBuffer(dev, 0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)) || !bb) return;
+    D3DSURFACE_DESC d;
+    if (SUCCEEDED(IDirect3DSurface9_GetDesc(bb, &d))) {
+        char text[16];
+        int n = snprintf(text, sizeof text, "%d FPS", fps > 9999 ? 9999 : fps);
+        int px = ((int)d.Height + 245) / 490;              /* font pixel size: 1 at 600p, 2 at 1080p */
+        if (px < 1) px = 1;
+        int pad = 2 * px, w = n * 6 * px - px + 2 * pad, h = 7 * px + 2 * pad;
+        int x0 = (int)d.Width - w - 4 * px, y0 = 4 * px;
+        if (x0 >= 0) {
+            RECT r = { x0, y0, x0 + w, y0 + h };
+            IDirect3DDevice9_ColorFill(dev, bb, &r, D3DCOLOR_XRGB(16, 16, 16));
+            for (int i = 0; i < n; i++) {
+                const BYTE *g = g_font[glyph(text[i])];
+                int gx = x0 + pad + i * 6 * px;
+                for (int row = 0; row < 7; row++)
+                    for (int col = 0; col < 5;) {
+                        if (!(g[row] & (16 >> col))) { col++; continue; }
+                        int c1 = col;
+                        while (c1 < 5 && (g[row] & (16 >> c1))) c1++;
+                        RECT p = { gx + col * px, y0 + pad + row * px, gx + c1 * px, y0 + pad + (row + 1) * px };
+                        IDirect3DDevice9_ColorFill(dev, bb, &p, D3DCOLOR_XRGB(255, 255, 255));
+                        col = c1;
+                    }
+            }
+        }
+    }
+    IDirect3DSurface9_Release(bb);
+}
+
+/* Frame rate cap: wait until 1/limit s after the previous frame's deadline. Sleep(1) with a 1 ms
+ * timer resolution for most of the wait, then spin for the last ~2 ms for an even frame pace. */
+static void limit_fps(void)
+{
+    static LARGE_INTEGER freq, next;
+    LARGE_INTEGER now;
+    if (!freq.QuadPart) {
+        QueryPerformanceFrequency(&freq);
+        timeBeginPeriod(1);
+    }
+    LONGLONG period = freq.QuadPart / g_fpsLimit;
+    QueryPerformanceCounter(&now);
+    if (!next.QuadPart || now.QuadPart - next.QuadPart > period) {   /* first frame or far behind */
+        next.QuadPart = now.QuadPart + period;
+        return;
+    }
+    while (now.QuadPart < next.QuadPart) {
+        LONGLONG ms = (next.QuadPart - now.QuadPart) * 1000 / freq.QuadPart;
+        if (ms > 2) Sleep((DWORD)(ms - 2)); else YieldProcessor();
+        QueryPerformanceCounter(&now);
+    }
+    next.QuadPart += period;
+}
+
 static HRESULT STDMETHODCALLTYPE hk_Present(IDirect3DDevice9 *dev, const RECT *src, const RECT *dst,
                                             HWND wnd, const RGNDATA *dirty)
 {
-    if (!dst) dst = &g_dst;
+    if (g_fpsLimit) limit_fps();
+    if (g_showFps) draw_fps(dev);
+    if (g_borderless && !dst) dst = &g_dst;
     return g_origPresent(dev, src, dst, wnd, dirty);
 }
 
@@ -296,6 +393,17 @@ static HRESULT STDMETHODCALLTYPE hk_CreateDevice(IDirect3D9 *d3d, UINT adapter, 
                                                  HWND focus, DWORD flags, D3DPRESENT_PARAMETERS *pp,
                                                  IDirect3DDevice9 **out)
 {
+    if (!g_borderless) {      /* FPS counter/limit only: hook Present, change nothing else */
+        HRESULT hr0 = g_origCreateDevice(d3d, adapter, type, focus, flags, pp, out);
+        if (SUCCEEDED(hr0) && *out && !g_origReset) {
+            void **vt = *(void ***)*out;
+            g_origReset = (PFN_Reset)vt[16];
+            g_origPresent = (PFN_Present)vt[17];
+            patch_ptr(&vt[16], (void *)hk_Reset);
+            patch_ptr(&vt[17], (void *)hk_Present);
+        }
+        return hr0;
+    }
     g_hwnd = focus;
     D3DPRESENT_PARAMETERS mine = *pp;
     make_windowed(&mine);
@@ -484,7 +592,7 @@ IDirect3D9 *WINAPI Direct3DCreate9(UINT sdk)
     load_real();
     if (!g_realCreate9) return NULL;
     IDirect3D9 *d3d = g_realCreate9(sdk);
-    if (d3d && g_borderless && !g_origCreateDevice) {
+    if (d3d && (g_borderless || g_showFps || g_fpsLimit) && !g_origCreateDevice) {
         void **vt = *(void ***)d3d;
         g_origCreateDevice = (PFN_CreateDevice)vt[16];
         patch_ptr(&vt[16], (void *)hk_CreateDevice);
@@ -499,7 +607,8 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID r)
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(h);
         load_config();
-        logf("--- d3d9 proxy loaded: Borderless=%d KeepAspect=%d", g_borderless, g_keepAspect);
+        logf("--- d3d9 proxy loaded: Borderless=%d KeepAspect=%d ShowFPS=%d FPSLimit=%d", g_borderless, g_keepAspect,
+             g_showFps, g_fpsLimit);
         g_switchState = (BYTE)(g_borderless != 0);
         patch_video_menu();
         patch_resolution();
