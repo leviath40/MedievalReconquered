@@ -441,3 +441,19 @@ Third pass, 2026-11-01, for the borderless fullscreen patch (`patches/borderless
 ## 10. Large Address Aware (2026-11-02)
 
 - The shipped exe lacks `IMAGE_FILE_LARGE_ADDRESS_AWARE` (Characteristics 0x010E), so it is limited to 2 GB. A 64-bit port is not realistic (no source; pointer-size assumptions throughout). `patches/laa/apply_laa.py` sets the flag (0x012E) and refreshes the PE checksum. Boot smoke test passes; memory above 2 GB is only reached in heavy play, so long sessions are the real test.
+
+## 11. Battle performance (2026-11-02)
+
+Measured with the proxy's profiler (`Profile=1`, on by default → `profile.log`, restarted past 4 MB, one line per second + call-site/draw details every 10 s), 16 v 16 units at max unit size, 2560×1440, RTX 4070 SUPER. The engine is single-threaded (one busy thread; multithreading is not realistic), but the main thread was ~30 % idle: frames were lost waiting on the GPU.
+
+| ms per frame | original | + BatchUI | + FastDraw |
+|---|---|---|---|
+| render-target locks | 11.1 (17/frame) | 4.3 (5) | 4.2 (5) |
+| draw calls | 7–17 | 10.7 | 1.5 |
+| game code | 12.2 | 7.3 | 5.5 |
+| **FPS avg / worst second** | ~26 / <20 | ~48 / <20 | **~81 / 69** |
+
+- **Back-buffer locks.** The game still draws 2D by hand into its DirectDraw back buffer. Every 2D drawer goes through the "safe back screen" lock `FUN_00467a90` (`safebackscreen.cpp`, flag `0x986A90`) → `FUN_00411fa0` → Proteus `IDirectDrawSurface7::Lock` (0xF42210) → `0xF3F120`, which locks the D3D9 render target directly when a Z buffer is attached (flag 0xF440D0) or else copies it with `GetRenderTargetData`. Proteus unlocks lazily (`0xF3E8A0`, called before draws), so a real lock happens every time 2D follows 3D: a GPU sync plus a full-frame copy each way.
+- **Battle UI panels** (`bmdialogbase.cpp`, `FUN_004c4270`): 3D background (vtable +0x18), then lock + 2D (vtable +0x10 test, +0x14 draw, tail at 0x4C4347). The panel-group draw method `0x4CEAC0` (pass 4) loops over them. `BatchUI=1` (proxy, in memory): the tail queues the 2D part while a group is drawn and the group method (replaced) draws all of them under one lock at the end, in order. About 13 locks/frame → 1.
+- **Remaining 5 locks** come from different HUD parts (battle HUD `FUN_004b7f50` / `battleplayer.cpp`, `FUN_00411e20` from 0x4BFBB8, the group flush, …) with 3D in between; wrapping `FUN_004b7f50` and gating the lock was tried and gained nothing (reverted). Removing them would need all 2D redirected to an overlay composited at frame end.
+- **DrawIndexedPrimitiveUP** (Proteus, ~230/frame, ~70 vertices each) cost ~25 µs per call on the driver vs ~1.5 µs for DrawPrimitiveUP. `FastDraw=1` copies vertices/indices into our dynamic VB/IB ring buffers (NOOVERWRITE, DISCARD on wrap; released before Reset) and calls DrawIndexedPrimitive, then sets stream 0 / indices to NULL as DIPUP does. ~2 µs per call. No rendering differences seen.

@@ -26,6 +26,10 @@
  *   BattleHeight=0
  *   ShowFPS=0        ; 1 = framerate counter at the top right (works in both display modes)
  *   FPSLimit=0       ; frame rate cap, e.g. 60 (0 = off; works in both display modes)
+ *   FastDraw=1       ; 1 = replay DrawIndexedPrimitiveUP through our own dynamic buffers (faster)
+ *   BatchUI=1        ; 1 = draw the battle UI panels' 2D parts under one back-buffer lock (faster)
+ *   Profile=1        ; 1 = write profile.log: per-second breakdown of frame time (on by default,
+ *                    ;     new file past 4 MB; 0 = off)
  *   Log=0            ; 1 = write borderless.log
  */
 #define WIN32_LEAN_AND_MEAN
@@ -34,6 +38,7 @@
 #include <d3d9.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <string.h>
 #include <mmsystem.h>
 
 typedef IDirect3D9 *(WINAPI *PFN_Create9)(UINT);
@@ -55,7 +60,7 @@ static PFN_GetCursorPos g_realGetCursorPos;
 static PFN_SetCursorPos g_realSetCursorPos;
 static PFN_ClipCursor g_realClipCursor;
 
-static int g_borderless = 1, g_keepAspect = 1, g_log = 0, g_showFps = 0, g_fpsLimit = 0;
+static int g_borderless = 1, g_keepAspect = 1, g_log = 0, g_showFps = 0, g_fpsLimit = 0, g_profile = 1, g_batchUI = 1, g_fastDraw = 1;
 static int g_campW, g_campH, g_batW, g_batH;   /* resolution overrides from the ini, 0 = off */
 static HWND g_hwnd;
 static WNDPROC g_origWndProc;
@@ -92,6 +97,9 @@ static void load_config(void)
     g_log = GetPrivateProfileIntA("Display", "Log", 0, ini);
     g_showFps = GetPrivateProfileIntA("Display", "ShowFPS", 0, ini);
     g_fpsLimit = GetPrivateProfileIntA("Display", "FPSLimit", 0, ini);
+    g_profile = GetPrivateProfileIntA("Display", "Profile", 1, ini);
+    g_batchUI = GetPrivateProfileIntA("Display", "BatchUI", 1, ini);
+    g_fastDraw = GetPrivateProfileIntA("Display", "FastDraw", 1, ini);
     if (g_fpsLimit < 0 || g_fpsLimit > 1000) g_fpsLimit = 0;
     g_campW = GetPrivateProfileIntA("Display", "CampaignWidth", 0, ini);
     g_campH = GetPrivateProfileIntA("Display", "CampaignHeight", 0, ini);
@@ -277,8 +285,124 @@ static void make_windowed(D3DPRESENT_PARAMETERS *pp)
     fit_window();
 }
 
+/* ------------------------------------------------------------------ fast indexed draws (FastDraw=1)
+ *
+ * Proteus draws most battle geometry with DrawIndexedPrimitiveUP (data passed from memory). On
+ * current drivers each such call costs ~25 us even for ~70 vertices, about 15x a DrawPrimitiveUP of the
+ * same size. We copy the vertices and indices into our own dynamic buffers (ring buffers: NOOVERWRITE
+ * while there is room, DISCARD when wrapping, so the CPU never waits for the GPU) and issue a normal
+ * DrawIndexedPrimitive. Afterwards stream 0 and the index buffer are set to NULL, which is the state
+ * DrawIndexedPrimitiveUP leaves behind. The buffers are D3DPOOL_DEFAULT: released before Reset and
+ * recreated on the next draw.
+ */
+#define FD_VB_SIZE (8u << 20)
+#define FD_IB_SIZE (2u << 20)
+
+typedef HRESULT (STDMETHODCALLTYPE *PFN_DIPUP_)(IDirect3DDevice9 *, D3DPRIMITIVETYPE, UINT, UINT, UINT, const void *,
+                                                D3DFORMAT, const void *, UINT);
+static PFN_DIPUP_ g_fdOrigDIPUP;
+static IDirect3DVertexBuffer9 *g_fdVb;
+static IDirect3DIndexBuffer9 *g_fdIb[2];          /* 16-bit, 32-bit indices */
+static UINT g_fdVbPos, g_fdIbPos[2];
+static int g_fdFailed;                            /* buffer creation failed: stay on the original path */
+
+static void fd_release(void)
+{
+    if (g_fdVb) { IDirect3DVertexBuffer9_Release(g_fdVb); g_fdVb = NULL; }
+    for (int i = 0; i < 2; i++)
+        if (g_fdIb[i]) { IDirect3DIndexBuffer9_Release(g_fdIb[i]); g_fdIb[i] = NULL; }
+    g_fdVbPos = g_fdIbPos[0] = g_fdIbPos[1] = 0;
+}
+
+static UINT fd_index_count(D3DPRIMITIVETYPE t, UINT prims)
+{
+    switch (t) {
+    case D3DPT_TRIANGLELIST:  return prims * 3;
+    case D3DPT_TRIANGLESTRIP:
+    case D3DPT_TRIANGLEFAN:   return prims + 2;
+    case D3DPT_LINELIST:      return prims * 2;
+    case D3DPT_LINESTRIP:     return prims + 1;
+    case D3DPT_POINTLIST:     return prims;
+    default:                  return 0;
+    }
+}
+
+static int fd_ensure(IDirect3DDevice9 *dev, int i32)
+{
+    if (g_fdFailed) return 0;
+    DWORD usage = D3DUSAGE_DYNAMIC | D3DUSAGE_WRITEONLY;
+    D3DDEVICE_CREATION_PARAMETERS cp;
+    if (SUCCEEDED(IDirect3DDevice9_GetCreationParameters(dev, &cp)) &&
+        (cp.BehaviorFlags & (D3DCREATE_SOFTWARE_VERTEXPROCESSING | D3DCREATE_MIXED_VERTEXPROCESSING)))
+        usage |= D3DUSAGE_SOFTWAREPROCESSING;
+    if (!g_fdVb && FAILED(IDirect3DDevice9_CreateVertexBuffer(dev, FD_VB_SIZE, usage, 0, D3DPOOL_DEFAULT, &g_fdVb, NULL))) {
+        g_fdVb = NULL;
+        g_fdFailed = 1;
+        logf("fastdraw: vertex buffer creation failed, using the original draws");
+        return 0;
+    }
+    if (!g_fdIb[i32] && FAILED(IDirect3DDevice9_CreateIndexBuffer(dev, FD_IB_SIZE, usage,
+                                                                  i32 ? D3DFMT_INDEX32 : D3DFMT_INDEX16,
+                                                                  D3DPOOL_DEFAULT, &g_fdIb[i32], NULL))) {
+        g_fdIb[i32] = NULL;
+        g_fdFailed = 1;
+        logf("fastdraw: index buffer creation failed, using the original draws");
+        return 0;
+    }
+    return 1;
+}
+
+static HRESULT STDMETHODCALLTYPE fd_DIPUP(IDirect3DDevice9 *dev, D3DPRIMITIVETYPE type, UINT minIdx, UINT numV,
+                                          UINT prims, const void *idata, D3DFORMAT ifmt, const void *vdata,
+                                          UINT stride)
+{
+    int i32 = ifmt == D3DFMT_INDEX32;
+    UINT isz = i32 ? 4 : 2, nidx = fd_index_count(type, prims);
+    UINT vbytes = numV * stride, ibytes = nidx * isz;
+    if (!idata || !vdata || !stride || !numV || !nidx || (ifmt != D3DFMT_INDEX16 && !i32) ||
+        vbytes > FD_VB_SIZE / 4 || ibytes > FD_IB_SIZE / 4 || !fd_ensure(dev, i32))
+        return g_fdOrigDIPUP(dev, type, minIdx, numV, prims, idata, ifmt, vdata, stride);
+
+    void *p;
+    UINT voff = (g_fdVbPos + stride - 1) / stride * stride;
+    DWORD vflag = D3DLOCK_NOOVERWRITE;
+    if (voff + vbytes > FD_VB_SIZE) { voff = 0; vflag = D3DLOCK_DISCARD; }
+    if (FAILED(IDirect3DVertexBuffer9_Lock(g_fdVb, voff, vbytes, &p, vflag)))
+        return g_fdOrigDIPUP(dev, type, minIdx, numV, prims, idata, ifmt, vdata, stride);
+    memcpy(p, (const BYTE *)vdata + (size_t)minIdx * stride, vbytes);
+    IDirect3DVertexBuffer9_Unlock(g_fdVb);
+    g_fdVbPos = voff + vbytes;
+
+    UINT ioff = (g_fdIbPos[i32] + isz - 1) / isz * isz;
+    DWORD iflag = D3DLOCK_NOOVERWRITE;
+    if (ioff + ibytes > FD_IB_SIZE) { ioff = 0; iflag = D3DLOCK_DISCARD; }
+    if (FAILED(IDirect3DIndexBuffer9_Lock(g_fdIb[i32], ioff, ibytes, &p, iflag)))
+        return g_fdOrigDIPUP(dev, type, minIdx, numV, prims, idata, ifmt, vdata, stride);
+    memcpy(p, idata, ibytes);
+    IDirect3DIndexBuffer9_Unlock(g_fdIb[i32]);
+    g_fdIbPos[i32] = ioff + ibytes;
+
+    IDirect3DDevice9_SetStreamSource(dev, 0, g_fdVb, 0, stride);
+    IDirect3DDevice9_SetIndices(dev, g_fdIb[i32]);
+    HRESULT hr = IDirect3DDevice9_DrawIndexedPrimitive(dev, type, (INT)(voff / stride) - (INT)minIdx, minIdx, numV,
+                                                       ioff / isz, prims);
+    IDirect3DDevice9_SetStreamSource(dev, 0, NULL, 0, 0);
+    IDirect3DDevice9_SetIndices(dev, NULL);
+    return hr;
+}
+
+static void fd_install(IDirect3DDevice9 *dev)
+{
+    if (!g_fastDraw || g_fdOrigDIPUP) return;
+    void **vt = *(void ***)dev;
+    g_fdOrigDIPUP = (PFN_DIPUP_)vt[84];
+    patch_ptr(&vt[84], (void *)fd_DIPUP);
+    logf("fastdraw: DrawIndexedPrimitiveUP redirected");
+}
+
 static HRESULT STDMETHODCALLTYPE hk_Reset(IDirect3DDevice9 *dev, D3DPRESENT_PARAMETERS *pp)
 {
+    fd_release();                 /* our D3DPOOL_DEFAULT buffers must go before Reset */
     if (!g_borderless) return g_origReset(dev, pp);
     D3DPRESENT_PARAMETERS mine = *pp;
     make_windowed(&mine);
@@ -380,20 +504,401 @@ static void limit_fps(void)
     next.QuadPart += period;
 }
 
+/* ------------------------------------------------------------------ profiler (Profile=1)
+ *
+ * Times the Direct3D calls where a frame can lose time (Present, EndScene, draws, buffer/texture/
+ * surface locks, copies, resource creation) and writes one line per second to profile.log, in ms
+ * per frame. "game" = frame time minus everything measured = the game's own code.
+ * Resource vtables are patched the first time an object of that class is seen.
+ */
+typedef struct { LONGLONG t; unsigned n; } Acc;
+enum { A_PRESENT, A_LIMIT, A_ENDSCENE, A_DRAW, A_BUF, A_TEX, A_SURF, A_COPY, A_CREATE, A_COUNT };
+static const char *const g_accName[A_COUNT] = { "present", "limit", "endscene", "draw", "buflock", "texlock",
+                                                "surflock", "copy", "create" };
+static Acc g_acc[A_COUNT];
+/* buffer lock classes: dynamic+DISCARD, dynamic+NOOVERWRITE, dynamic plain, static DEFAULT, MANAGED, other */
+static unsigned g_bufClass[6];
+static LARGE_INTEGER g_pFreq;
+static LONGLONG g_pFrameStart, g_pSecStart, g_pMaxFrame;
+static unsigned g_pFrames, g_pSlow;
+
+static LONGLONG qpc(void) { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t.QuadPart; }
+#define TIMED(acc, call) do { LONGLONG t0_ = qpc(); hr = (call); g_acc[acc].t += qpc() - t0_; g_acc[acc].n++; } while (0)
+
+typedef struct { void **vt; void *orig; } VtHook;
+static VtHook g_hVb[8], g_hIb[8], g_hTex[8], g_hSurf[8], g_hLevel[8];
+
+static void *orig_of(VtHook *h, void *obj)
+{
+    void **vt = *(void ***)obj;
+    for (int i = 0; i < 8; i++) if (h[i].vt == vt) return h[i].orig;
+    return NULL;
+}
+
+static void hook_vt(VtHook *h, void *obj, int idx, void *fn)
+{
+    if (!obj) return;
+    void **vt = *(void ***)obj;
+    for (int i = 0; i < 8; i++) {
+        if (h[i].vt == vt) return;
+        if (!h[i].vt) {
+            if (vt[idx] == fn) return;             /* shared with an already hooked class */
+            h[i].vt = vt;
+            h[i].orig = vt[idx];
+            patch_ptr(&vt[idx], fn);
+            logf("profile: hooked vtable %p slot %d", (void *)vt, idx);
+            return;
+        }
+    }
+}
+
+typedef HRESULT (STDMETHODCALLTYPE *PFN_BufLock)(void *, UINT, UINT, void **, DWORD);
+typedef HRESULT (STDMETHODCALLTYPE *PFN_GetDesc)(void *, void *);
+typedef HRESULT (STDMETHODCALLTYPE *PFN_TexLock)(void *, UINT, D3DLOCKED_RECT *, const RECT *, DWORD);
+typedef HRESULT (STDMETHODCALLTYPE *PFN_SurfLock)(void *, D3DLOCKED_RECT *, const RECT *, DWORD);
+typedef HRESULT (STDMETHODCALLTYPE *PFN_GetLevel)(void *, UINT, IDirect3DSurface9 **);
+
+static void classify_buf(void *buf, DWORD flags)
+{
+    DWORD desc[8] = { 0 };                     /* VB/IB desc: Format, Type, Usage, Pool, ... */
+    ((PFN_GetDesc)(*(void ***)buf)[13])(buf, desc);
+    DWORD usage = desc[2], pool = desc[3];
+    int c = 5;
+    if (pool == D3DPOOL_MANAGED) c = 4;
+    else if (pool == D3DPOOL_DEFAULT && (usage & D3DUSAGE_DYNAMIC))
+        c = (flags & D3DLOCK_DISCARD) ? 0 : (flags & D3DLOCK_NOOVERWRITE) ? 1 : 2;
+    else if (pool == D3DPOOL_DEFAULT) c = 3;
+    g_bufClass[c]++;
+}
+
+static HRESULT STDMETHODCALLTYPE pk_VbLock(void *b, UINT off, UINT size, void **data, DWORD flags)
+{
+    HRESULT hr;
+    classify_buf(b, flags);
+    TIMED(A_BUF, ((PFN_BufLock)orig_of(g_hVb, b))(b, off, size, data, flags));
+    return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE pk_IbLock(void *b, UINT off, UINT size, void **data, DWORD flags)
+{
+    HRESULT hr;
+    classify_buf(b, flags);
+    TIMED(A_BUF, ((PFN_BufLock)orig_of(g_hIb, b))(b, off, size, data, flags));
+    return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE pk_TexLock(void *t, UINT lvl, D3DLOCKED_RECT *lr, const RECT *r, DWORD flags)
+{
+    HRESULT hr;
+    TIMED(A_TEX, ((PFN_TexLock)orig_of(g_hTex, t))(t, lvl, lr, r, flags));
+    return hr;
+}
+
+/* surface locks by call site + surface kind, dumped every 10 s (top entries by time) */
+typedef struct { void *caller, *g[5]; D3DSURFACE_DESC d; DWORD flags; LONG rw, rh; LONGLONG t; unsigned n;
+                 unsigned drawsBefore; } SiteStat;
+static unsigned g_drawsSinceLock;
+static SiteStat g_sites[64];
+static unsigned g_drawKind[4];
+static double g_dipupVerts, g_dipupPrims, g_dipupBytes, g_dipupIdx; /* DIPUP sums over the dump period */
+static unsigned g_dipupHist[8];   /* NumVertices buckets: <64 <256 <1k <4k <16k <64k more */
+static LONGLONG g_drawKindT[4];
+
+/* Is a a plausible return address in the game's original code (preceded by a call instruction)? */
+static int game_ret(DWORD a)
+{
+    if (a < 0x401010 || a >= 0x78358E) return 0;
+    const BYTE *b = (const BYTE *)a;
+    return b[-5] == 0xE8 || (b[-2] == 0xFF && (b[-1] & 0x38) == 0x10) || (b[-3] == 0xFF && (b[-2] & 0x38) == 0x10) ||
+           (b[-6] == 0xFF && (b[-5] & 0x38) == 0x10) || (b[-7] == 0xFF && (b[-6] & 0x38) == 0x10);
+}
+
+static void site_add(void *caller, const D3DSURFACE_DESC *d, DWORD flags, const RECT *r, LONGLONG t)
+{
+    void *g[5] = { 0 };
+    int ng = 0;
+    if (d->Usage & D3DUSAGE_RENDERTARGET) {
+        DWORD *sp = (DWORD *)__builtin_frame_address(0);
+        DWORD *top = (DWORD *)((NT_TIB *)NtCurrentTeb())->StackBase;  /* stay inside this thread's stack */
+        for (int i = 0; i < 1500 && ng < 5 && sp + i < top; i++)
+            if (game_ret(sp[i]) && (!ng || g[ng - 1] != (void *)sp[i])) g[ng++] = (void *)sp[i];
+    }
+    LONG rw = r ? r->right - r->left : -1, rh = r ? r->bottom - r->top : -1;
+    for (int i = 0; i < 64; i++) {
+        SiteStat *e = &g_sites[i];
+        if (e->n && (e->caller != caller || memcmp(e->g, g, sizeof g) || e->flags != flags || e->rw != rw || e->rh != rh ||
+                     e->d.Format != d->Format || e->d.Usage != d->Usage || e->d.Pool != d->Pool ||
+                     e->d.Width != d->Width || e->d.Height != d->Height))
+            continue;
+        if (!e->n) { e->caller = caller; memcpy(e->g, g, sizeof g); e->d = *d; e->flags = flags; e->rw = rw; e->rh = rh; }
+        e->n++;
+        e->drawsBefore += g_drawsSinceLock;
+        e->t += t;
+        return;
+    }
+}
+
+static void sites_dump(FILE *f)
+{
+    double ms = 1000.0 / (double)g_pFreq.QuadPart;
+    fprintf(f, "  surface locks, last 10 s (caller [game ret1 ret2] fmt usage pool WxH flags rect: calls, total ms, "
+               "ms/call, draws before):\n");
+    for (int k = 0; k < 16; k++) {
+        int best = -1;
+        for (int i = 0; i < 64; i++)
+            if (g_sites[i].n && (best < 0 || g_sites[i].t > g_sites[best].t)) best = i;
+        if (best < 0) break;
+        SiteStat *e = &g_sites[best];
+        fprintf(f, "    %p [%p %p %p %p %p] fmt %d usage %#lx pool %d %ux%u flags %#lx rect %ldx%ld: %u, %.1f, %.3f, %.1f\n",
+                e->caller, e->g[0], e->g[1], e->g[2], e->g[3], e->g[4], (int)e->d.Format, e->d.Usage, (int)e->d.Pool, e->d.Width, e->d.Height,
+                e->flags, e->rw, e->rh, e->n, (double)e->t * ms, (double)e->t * ms / e->n,
+                (double)e->drawsBefore / e->n);
+        e->n = 0;
+        e->t = 0;
+    }
+    memset(g_sites, 0, sizeof g_sites);
+    fprintf(f, "  draws, last 10 s (DP/DIP/DPUP/DIPUP: calls, total ms): %u %.0f / %u %.0f / %u %.0f / %u %.0f\n",
+            g_drawKind[0], (double)g_drawKindT[0] * ms, g_drawKind[1], (double)g_drawKindT[1] * ms,
+            g_drawKind[2], (double)g_drawKindT[2] * ms, g_drawKind[3], (double)g_drawKindT[3] * ms);
+    if (g_drawKind[3])
+        fprintf(f, "  DIPUP per call: verts %.0f prims %.0f bytes %.0f | NumVertices <64/<256/<1k/<4k/<16k/<64k/more: "
+                   "%u %u %u %u %u %u %u\n", g_dipupVerts / g_drawKind[3], g_dipupPrims / g_drawKind[3],
+                g_dipupBytes / g_drawKind[3], g_dipupHist[0], g_dipupHist[1], g_dipupHist[2], g_dipupHist[3],
+                g_dipupHist[4], g_dipupHist[5], g_dipupHist[6] + g_dipupHist[7]);
+    g_dipupVerts = g_dipupPrims = g_dipupBytes = g_dipupIdx = 0;
+    memset(g_dipupHist, 0, sizeof g_dipupHist);
+    memset(g_drawKind, 0, sizeof g_drawKind);
+    memset(g_drawKindT, 0, sizeof g_drawKindT);
+}
+
+typedef HRESULT (STDMETHODCALLTYPE *PFN_SurfDesc)(void *, D3DSURFACE_DESC *);
+static HRESULT STDMETHODCALLTYPE pk_SurfLock(void *s, D3DLOCKED_RECT *lr, const RECT *r, DWORD flags)
+{
+    HRESULT hr;
+    D3DSURFACE_DESC d = { 0 };
+    ((PFN_SurfDesc)(*(void ***)s)[12])(s, &d);
+    LONGLONG t0 = qpc();
+    TIMED(A_SURF, ((PFN_SurfLock)orig_of(g_hSurf, s))(s, lr, r, flags));
+    site_add(__builtin_return_address(0), &d, flags, r, qpc() - t0);
+    if (d.Usage & D3DUSAGE_RENDERTARGET) g_drawsSinceLock = 0;
+    return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE pk_GetLevel(void *t, UINT lvl, IDirect3DSurface9 **out)
+{
+    HRESULT hr = ((PFN_GetLevel)orig_of(g_hLevel, t))(t, lvl, out);
+    if (SUCCEEDED(hr) && out && *out) hook_vt(g_hSurf, *out, 13, (void *)pk_SurfLock);
+    return hr;
+}
+
+/* device methods (vtable index in the comments) */
+static void *g_pOrig[120];
+#define ORIG(i, T) ((T)g_pOrig[i])
+
+typedef HRESULT (STDMETHODCALLTYPE *PFN_D0)(IDirect3DDevice9 *);
+static HRESULT STDMETHODCALLTYPE pk_EndScene(IDirect3DDevice9 *d)                                   /* 42 */
+{ HRESULT hr; TIMED(A_ENDSCENE, ORIG(42, PFN_D0)(d)); return hr; }
+
+typedef HRESULT (STDMETHODCALLTYPE *PFN_DP)(IDirect3DDevice9 *, D3DPRIMITIVETYPE, UINT, UINT);
+static HRESULT STDMETHODCALLTYPE pk_DP(IDirect3DDevice9 *d, D3DPRIMITIVETYPE t, UINT a, UINT b)    /* 81 */
+{ HRESULT hr; LONGLONG t0 = qpc(); TIMED(A_DRAW, ORIG(81, PFN_DP)(d, t, a, b)); g_drawKind[0]++; g_drawsSinceLock++; g_drawKindT[0] += qpc() - t0; return hr; }
+
+typedef HRESULT (STDMETHODCALLTYPE *PFN_DIP)(IDirect3DDevice9 *, D3DPRIMITIVETYPE, INT, UINT, UINT, UINT, UINT);
+static HRESULT STDMETHODCALLTYPE pk_DIP(IDirect3DDevice9 *d, D3DPRIMITIVETYPE t, INT a, UINT b, UINT c, UINT e,
+                                        UINT f)                                                 /* 82 */
+{ HRESULT hr; LONGLONG t0 = qpc(); TIMED(A_DRAW, ORIG(82, PFN_DIP)(d, t, a, b, c, e, f)); g_drawKind[1]++; g_drawsSinceLock++; g_drawKindT[1] += qpc() - t0; return hr; }
+
+typedef HRESULT (STDMETHODCALLTYPE *PFN_DPUP)(IDirect3DDevice9 *, D3DPRIMITIVETYPE, UINT, const void *, UINT);
+static HRESULT STDMETHODCALLTYPE pk_DPUP(IDirect3DDevice9 *d, D3DPRIMITIVETYPE t, UINT a, const void *p, UINT s)
+{ HRESULT hr; LONGLONG t0 = qpc(); TIMED(A_DRAW, ORIG(83, PFN_DPUP)(d, t, a, p, s)); g_drawKind[2]++; g_drawsSinceLock++; g_drawKindT[2] += qpc() - t0; return hr; }                  /* 83 */
+
+typedef HRESULT (STDMETHODCALLTYPE *PFN_DIPUP)(IDirect3DDevice9 *, D3DPRIMITIVETYPE, UINT, UINT, UINT, const void *,
+                                               D3DFORMAT, const void *, UINT);
+static HRESULT STDMETHODCALLTYPE pk_DIPUP(IDirect3DDevice9 *d, D3DPRIMITIVETYPE t, UINT a, UINT b, UINT c,
+                                          const void *i, D3DFORMAT f, const void *v, UINT s)   /* 84 */
+{ HRESULT hr; LONGLONG t0 = qpc();
+  g_dipupVerts += b; g_dipupPrims += c; g_dipupBytes += (double)b * s; g_dipupIdx += i ? 1 : 0;
+  { int k = 0; for (UINT x = b; x >= 64 && k < 7; x >>= 2) k++; g_dipupHist[k]++; }
+  TIMED(A_DRAW, ORIG(84, PFN_DIPUP)(d, t, a, b, c, i, f, v, s)); g_drawKind[3]++; g_drawsSinceLock++; g_drawKindT[3] += qpc() - t0; return hr; }
+
+typedef HRESULT (STDMETHODCALLTYPE *PFN_UpdSurf)(IDirect3DDevice9 *, void *, const RECT *, void *, const POINT *);
+static HRESULT STDMETHODCALLTYPE pk_UpdSurf(IDirect3DDevice9 *d, void *a, const RECT *r, void *b, const POINT *p)
+{ HRESULT hr; TIMED(A_COPY, ORIG(30, PFN_UpdSurf)(d, a, r, b, p)); return hr; }               /* 30 */
+
+typedef HRESULT (STDMETHODCALLTYPE *PFN_DPP)(IDirect3DDevice9 *, void *, void *);
+static HRESULT STDMETHODCALLTYPE pk_UpdTex(IDirect3DDevice9 *d, void *a, void *b)            /* 31 */
+{ HRESULT hr; TIMED(A_COPY, ORIG(31, PFN_DPP)(d, a, b)); return hr; }
+static HRESULT STDMETHODCALLTYPE pk_GetRTData(IDirect3DDevice9 *d, void *a, void *b)         /* 32 */
+{ HRESULT hr; TIMED(A_COPY, ORIG(32, PFN_DPP)(d, a, b)); return hr; }
+
+typedef HRESULT (STDMETHODCALLTYPE *PFN_Stretch)(IDirect3DDevice9 *, void *, const RECT *, void *, const RECT *,
+                                                 D3DTEXTUREFILTERTYPE);
+static HRESULT STDMETHODCALLTYPE pk_Stretch(IDirect3DDevice9 *d, void *a, const RECT *r, void *b, const RECT *r2,
+                                            D3DTEXTUREFILTERTYPE f)                            /* 34 */
+{ HRESULT hr; TIMED(A_COPY, ORIG(34, PFN_Stretch)(d, a, r, b, r2, f)); return hr; }
+
+typedef HRESULT (STDMETHODCALLTYPE *PFN_CTex)(IDirect3DDevice9 *, UINT, UINT, UINT, DWORD, D3DFORMAT, D3DPOOL,
+                                              IDirect3DTexture9 **, HANDLE *);
+static HRESULT STDMETHODCALLTYPE pk_CTex(IDirect3DDevice9 *d, UINT w, UINT h, UINT l, DWORD u, D3DFORMAT f,
+                                         D3DPOOL p, IDirect3DTexture9 **o, HANDLE *sh)         /* 23 */
+{
+    HRESULT hr;
+    TIMED(A_CREATE, ORIG(23, PFN_CTex)(d, w, h, l, u, f, p, o, sh));
+    if (SUCCEEDED(hr) && o && *o) {
+        hook_vt(g_hTex, *o, 19, (void *)pk_TexLock);
+        hook_vt(g_hLevel, *o, 18, (void *)pk_GetLevel);
+    }
+    return hr;
+}
+
+typedef HRESULT (STDMETHODCALLTYPE *PFN_CBuf)(IDirect3DDevice9 *, UINT, DWORD, DWORD, D3DPOOL, void **, HANDLE *);
+static HRESULT STDMETHODCALLTYPE pk_CVb(IDirect3DDevice9 *d, UINT len, DWORD u, DWORD fvf, D3DPOOL p, void **o,
+                                        HANDLE *sh)                                            /* 26 */
+{
+    HRESULT hr;
+    TIMED(A_CREATE, ORIG(26, PFN_CBuf)(d, len, u, fvf, p, o, sh));
+    if (SUCCEEDED(hr) && o && *o) hook_vt(g_hVb, *o, 11, (void *)pk_VbLock);
+    return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE pk_CIb(IDirect3DDevice9 *d, UINT len, DWORD u, DWORD fmt, D3DPOOL p, void **o,
+                                        HANDLE *sh)                                            /* 27 */
+{
+    HRESULT hr;
+    TIMED(A_CREATE, ORIG(27, PFN_CBuf)(d, len, u, fmt, p, o, sh));
+    if (SUCCEEDED(hr) && o && *o) hook_vt(g_hIb, *o, 11, (void *)pk_IbLock);
+    return hr;
+}
+
+typedef HRESULT (STDMETHODCALLTYPE *PFN_COff)(IDirect3DDevice9 *, UINT, UINT, D3DFORMAT, D3DPOOL, void **, HANDLE *);
+static HRESULT STDMETHODCALLTYPE pk_COff(IDirect3DDevice9 *d, UINT w, UINT h, D3DFORMAT f, D3DPOOL p, void **o,
+                                         HANDLE *sh)                                           /* 36 */
+{
+    HRESULT hr;
+    TIMED(A_CREATE, ORIG(36, PFN_COff)(d, w, h, f, p, o, sh));
+    if (SUCCEEDED(hr) && o && *o) hook_vt(g_hSurf, *o, 13, (void *)pk_SurfLock);
+    return hr;
+}
+
+static void prof_hook_dev(IDirect3DDevice9 *dev, int idx, void *fn)
+{
+    void **vt = *(void ***)dev;
+    if (vt[idx] == fn) return;
+    g_pOrig[idx] = vt[idx];
+    patch_ptr(&vt[idx], fn);
+}
+
+static void prof_install(IDirect3DDevice9 *dev)
+{
+    static int done;
+    if (!g_profile || done) return;
+    done = 1;
+    QueryPerformanceFrequency(&g_pFreq);
+    prof_hook_dev(dev, 23, (void *)pk_CTex);
+    prof_hook_dev(dev, 26, (void *)pk_CVb);
+    prof_hook_dev(dev, 27, (void *)pk_CIb);
+    prof_hook_dev(dev, 30, (void *)pk_UpdSurf);
+    prof_hook_dev(dev, 31, (void *)pk_UpdTex);
+    prof_hook_dev(dev, 32, (void *)pk_GetRTData);
+    prof_hook_dev(dev, 34, (void *)pk_Stretch);
+    prof_hook_dev(dev, 36, (void *)pk_COff);
+    prof_hook_dev(dev, 42, (void *)pk_EndScene);
+    prof_hook_dev(dev, 81, (void *)pk_DP);
+    prof_hook_dev(dev, 82, (void *)pk_DIP);
+    prof_hook_dev(dev, 83, (void *)pk_DPUP);
+    prof_hook_dev(dev, 84, (void *)pk_DIPUP);
+    IDirect3DSurface9 *bb = NULL;
+    if (SUCCEEDED(IDirect3DDevice9_GetBackBuffer(dev, 0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)) && bb) {
+        hook_vt(g_hSurf, bb, 13, (void *)pk_SurfLock);
+        IDirect3DSurface9_Release(bb);
+    }
+    char path[MAX_PATH];
+    snprintf(path, sizeof path, "%sprofile.log", g_dir);
+    /* always on by default: start a fresh log once it passes 4 MB (about 4 hours of play) */
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    int fresh = GetFileAttributesExA(path, GetFileExInfoStandard, &fa) && (fa.nFileSizeHigh || fa.nFileSizeLow > (4u << 20));
+    FILE *f = fopen(path, fresh ? "w" : "a");
+    if (f) {
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        fprintf(f, "--- profile start %04d-%02d-%02d %02d:%02d:%02d | Borderless=%d FPSLimit=%d BatchUI=%d FastDraw=%d\n"
+                   "    ms per frame; n = calls per frame; game = frame - measured.\n"
+                   "    buf = buffer locks per frame: dynDISCARD/dynNOOVERWRITE/dynPlain/staticDEFAULT/MANAGED/other\n",
+                st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, g_borderless, g_fpsLimit, g_batchUI,
+                g_fastDraw);
+        fclose(f);
+    }
+}
+
+/* called once per frame, right after the real Present returned */
+static void prof_frame(LONGLONG now)
+{
+    if (!g_pSecStart) {
+        g_pSecStart = g_pFrameStart = now;
+        memset(g_acc, 0, sizeof g_acc);
+        memset(g_bufClass, 0, sizeof g_bufClass);
+        return;
+    }
+    LONGLONG ft = now - g_pFrameStart;
+    g_pFrameStart = now;
+    g_pFrames++;
+    if (ft > g_pMaxFrame) g_pMaxFrame = ft;
+    if (ft * 1000 > 50 * g_pFreq.QuadPart) g_pSlow++;
+    if ((now - g_pSecStart) < g_pFreq.QuadPart) return;
+
+    double ms = 1000.0 / (double)g_pFreq.QuadPart, fr = g_pFrames, total = (double)(now - g_pSecStart) * ms;
+    char line[1024];
+    int n = snprintf(line, sizeof line, "fps %5.1f | frame %5.1f max %5.1f slow>50ms %u", fr * 1000.0 / total,
+                     total / fr, (double)g_pMaxFrame * ms, g_pSlow);
+    double measured = 0;
+    for (int i = 0; i < A_COUNT; i++) {
+        double t = (double)g_acc[i].t * ms / fr;
+        measured += t;
+        if (g_acc[i].n)
+            n += snprintf(line + n, sizeof line - n, " | %s %.2f n%.0f", g_accName[i], t, g_acc[i].n / fr);
+    }
+    snprintf(line + n, sizeof line - n, " | game %.2f | buf %.0f/%.0f/%.0f/%.0f/%.0f/%.0f", total / fr - measured,
+             g_bufClass[0] / fr, g_bufClass[1] / fr, g_bufClass[2] / fr, g_bufClass[3] / fr,
+             g_bufClass[4] / fr, g_bufClass[5] / fr);
+    char path[MAX_PATH];
+    snprintf(path, sizeof path, "%sprofile.log", g_dir);
+    FILE *f = fopen(path, "a");
+    static int secs;
+    if (f) {
+        fprintf(f, "%s\n", line);
+        if (++secs % 10 == 0) sites_dump(f);
+        fclose(f);
+    }
+    memset(g_acc, 0, sizeof g_acc);
+    memset(g_bufClass, 0, sizeof g_bufClass);
+    g_pFrames = g_pSlow = 0;
+    g_pMaxFrame = 0;
+    g_pSecStart = now;
+}
+
 static HRESULT STDMETHODCALLTYPE hk_Present(IDirect3DDevice9 *dev, const RECT *src, const RECT *dst,
                                             HWND wnd, const RGNDATA *dirty)
 {
-    if (g_fpsLimit) limit_fps();
+    HRESULT hr;
+    if (g_fpsLimit) {
+        LONGLONG t0 = qpc();
+        limit_fps();
+        g_acc[A_LIMIT].t += qpc() - t0;
+        g_acc[A_LIMIT].n++;
+    }
     if (g_showFps) draw_fps(dev);
     if (g_borderless && !dst) dst = &g_dst;
-    return g_origPresent(dev, src, dst, wnd, dirty);
+    if (!g_profile) return g_origPresent(dev, src, dst, wnd, dirty);
+    TIMED(A_PRESENT, g_origPresent(dev, src, dst, wnd, dirty));
+    prof_frame(qpc());
+    return hr;
 }
 
 static HRESULT STDMETHODCALLTYPE hk_CreateDevice(IDirect3D9 *d3d, UINT adapter, D3DDEVTYPE type,
                                                  HWND focus, DWORD flags, D3DPRESENT_PARAMETERS *pp,
                                                  IDirect3DDevice9 **out)
 {
-    if (!g_borderless) {      /* FPS counter/limit only: hook Present, change nothing else */
+    if (!g_borderless) {      /* FPS counter/limit/profile only: hook Present, change nothing else */
         HRESULT hr0 = g_origCreateDevice(d3d, adapter, type, focus, flags, pp, out);
         if (SUCCEEDED(hr0) && *out && !g_origReset) {
             void **vt = *(void ***)*out;
@@ -401,6 +906,10 @@ static HRESULT STDMETHODCALLTYPE hk_CreateDevice(IDirect3D9 *d3d, UINT adapter, 
             g_origPresent = (PFN_Present)vt[17];
             patch_ptr(&vt[16], (void *)hk_Reset);
             patch_ptr(&vt[17], (void *)hk_Present);
+        }
+        if (SUCCEEDED(hr0) && *out) {
+            fd_install(*out);
+            prof_install(*out);
         }
         return hr0;
     }
@@ -424,6 +933,8 @@ static HRESULT STDMETHODCALLTYPE hk_CreateDevice(IDirect3D9 *d3d, UINT adapter, 
             patch_ptr(&vt[16], (void *)hk_Reset);
             patch_ptr(&vt[17], (void *)hk_Present);
         }
+        fd_install(*out);
+        prof_install(*out);
         install_hooks();
     }
     return hr;
@@ -560,6 +1071,89 @@ __asm__(".globl _res_thunk\n_res_thunk:\n"
         "  pushal\n  call _apply_resolution\n  popal\n"
         "  movl 0xE77B04, %edx\n  ret\n");
 
+/* ------------------------------------------------------------------ battle UI lock batching (BatchUI=1)
+ *
+ * Each battle-screen panel (bmdialogbase.cpp, FUN_004c4270) draws its 3D part, then locks the back
+ * buffer ("safe back screen", FUN_00467a90) and draws its 2D part by hand. Proteus turns each of those
+ * locks after a 3D draw into a full render-target readback (GPU sync + a frame-sized copy both ways),
+ * about 13 times per frame in battle. We queue the 2D parts while a panel group is drawn (group draw
+ * method 0x4CEAC0, pass 4) and draw them all under one lock at the end of the group, in their
+ * original order. The 3D parts are drawn as before.
+ *   0x4C4347 (23 bytes)  2D tail: if (vt[0x10](p)) { FUN_00467a90(); vt[0x14](p); }
+ *                        -> push esi / call ui_tail / jmp 0x4C435E
+ *   0x4CEAC0             group draw(pass) -> jmp ui_group_draw (same thiscall, ret 4)
+ */
+#define UI_TAIL         0x4C4347u
+#define UI_TAIL_END     0x4C435Eu
+#define UI_GROUP_DRAW   0x4CEAC0u
+#define FN_BACK_LOCK    0x467A90u      /* lock the back buffer for 2D drawing (no-op if locked) */
+#define FN_GROUP_ACTIVE 0x4C9620u      /* thiscall, returns al */
+
+typedef char (__attribute__((thiscall)) *PFN_ThisBool)(void *);
+typedef void (__attribute__((thiscall)) *PFN_ThisVoid)(void *);
+typedef void (__attribute__((thiscall)) *PFN_ThisInt)(void *, int);
+typedef void (*PFN_Void)(void);
+
+static void *g_uiQueue[256];
+static int g_uiQueued, g_uiDepth;
+
+static void ui_flush(void)
+{
+    if (!g_uiQueued) return;
+    ((PFN_Void)FN_BACK_LOCK)();
+    for (int i = 0; i < g_uiQueued; i++) {
+        void *p = g_uiQueue[i];
+        ((PFN_ThisVoid)(*(void ***)p)[0x14 / 4])(p);
+    }
+    g_uiQueued = 0;
+}
+
+static void __stdcall ui_tail(void *p)
+{
+    if (!((PFN_ThisBool)(*(void ***)p)[0x10 / 4])(p)) return;
+    if (g_uiDepth > 0 && g_uiQueued < (int)(sizeof g_uiQueue / sizeof *g_uiQueue)) {
+        g_uiQueue[g_uiQueued++] = p;
+        return;
+    }
+    ((PFN_Void)FN_BACK_LOCK)();
+    ((PFN_ThisVoid)(*(void ***)p)[0x14 / 4])(p);
+}
+
+/* replacement for the group draw method at 0x4CEAC0 (original: same loop, without the flush) */
+static void __attribute__((thiscall)) ui_group_draw(BYTE *grp, int pass)
+{
+    if (pass != 4 || !((PFN_ThisBool)FN_GROUP_ACTIVE)(grp)) return;
+    g_uiDepth++;
+    for (void **it = *(void ***)(grp + 8); it != *(void ***)(grp + 0xC); it++) {
+        void *panel = *it;
+        ((PFN_ThisInt)(*(void ***)panel)[2])(panel, 0);
+    }
+    if (--g_uiDepth == 0) ui_flush();
+}
+
+static void patch_ui_batch(void)
+{
+    static const BYTE tail_orig[23] = { 0x8B, 0x16, 0x8B, 0xCE, 0xFF, 0x52, 0x10, 0x84, 0xC0, 0x74, 0x0C, 0xE8,
+                                        0x39, 0x37, 0xFA, 0xFF, 0x8B, 0x06, 0x8B, 0xCE, 0xFF, 0x50, 0x14 };
+    static const BYTE group_orig[16] = { 0x8B, 0x44, 0x24, 0x04, 0x56, 0x57, 0x83, 0xF8, 0x04, 0x8B, 0xF9, 0x75,
+                                         0x26, 0xE8, 0x4E, 0xAB };
+    if (memcmp((void *)UI_TAIL, tail_orig, sizeof tail_orig) || memcmp((void *)UI_GROUP_DRAW, group_orig, sizeof group_orig)) {
+        logf("ui batch: code differs, not patched");
+        return;
+    }
+    BYTE tail[23];
+    memset(tail, 0x90, sizeof tail);
+    tail[0] = 0x56;                                                  /* push esi */
+    tail[1] = 0xE8;                                                  /* call ui_tail */
+    *(DWORD *)(tail + 2) = (DWORD)(UINT_PTR)ui_tail - (UI_TAIL + 6);
+    tail[6] = 0xE9;                                                  /* jmp 0x4C435E */
+    *(DWORD *)(tail + 7) = UI_TAIL_END - (UI_TAIL + 11);
+    BYTE jmp[5] = { 0xE9 };
+    *(DWORD *)(jmp + 1) = (DWORD)(UINT_PTR)ui_group_draw - (UI_GROUP_DRAW + 5);
+    int ok = patch_mem((void *)UI_TAIL, tail, sizeof tail) && patch_mem((void *)UI_GROUP_DRAW, jmp, sizeof jmp);
+    logf("ui batch: %s", ok ? "patched" : "patch failed");
+}
+
 static void patch_resolution(void)
 {
     static const BYTE orig[6] = { 0x8B, 0x15, 0x04, 0x7B, 0xE7, 0x00 };
@@ -592,7 +1186,7 @@ IDirect3D9 *WINAPI Direct3DCreate9(UINT sdk)
     load_real();
     if (!g_realCreate9) return NULL;
     IDirect3D9 *d3d = g_realCreate9(sdk);
-    if (d3d && (g_borderless || g_showFps || g_fpsLimit) && !g_origCreateDevice) {
+    if (d3d && (g_borderless || g_showFps || g_fpsLimit || g_profile || g_fastDraw) && !g_origCreateDevice) {
         void **vt = *(void ***)d3d;
         g_origCreateDevice = (PFN_CreateDevice)vt[16];
         patch_ptr(&vt[16], (void *)hk_CreateDevice);
@@ -607,11 +1201,12 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID r)
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(h);
         load_config();
-        logf("--- d3d9 proxy loaded: Borderless=%d KeepAspect=%d ShowFPS=%d FPSLimit=%d", g_borderless, g_keepAspect,
-             g_showFps, g_fpsLimit);
+        logf("--- d3d9 proxy loaded: Borderless=%d KeepAspect=%d ShowFPS=%d FPSLimit=%d Profile=%d", g_borderless,
+             g_keepAspect, g_showFps, g_fpsLimit, g_profile);
         g_switchState = (BYTE)(g_borderless != 0);
         patch_video_menu();
         patch_resolution();
+        if (g_batchUI) patch_ui_batch();
     }
     return TRUE;
 }
