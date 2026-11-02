@@ -25,6 +25,7 @@ python tools\smoke_test.py                    # check the game still boots
 Borderless=1   ; 1 = borderless fullscreen, 0 = original exclusive fullscreen (also set by the Video menu switch)
 KeepAspect=1   ; 1 = keep the game's aspect ratio (black bars), 0 = stretch to the whole screen
 ShowFPS=0      ; 1 = framerate counter at the top right (both display modes)
+FPSLimit=0     ; frame rate cap, e.g. 60 (0 = off; both display modes)
 Log=0          ; 1 = write borderless.log
 CampaignWidth=0    ; campaign map resolution, 0 = keep the game's Video menu setting
 CampaignHeight=0
