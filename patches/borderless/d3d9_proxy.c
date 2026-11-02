@@ -62,7 +62,7 @@ static PFN_GetCursorPos g_realGetCursorPos;
 static PFN_SetCursorPos g_realSetCursorPos;
 static PFN_ClipCursor g_realClipCursor;
 
-static int g_borderless = 1, g_keepAspect = 1, g_log = 0, g_showFps = 0, g_fpsLimit = 0, g_profile = 1, g_batchUI = 1, g_fastDraw = 1, g_upscale = 2;
+static int g_borderless = 1, g_keepAspect = 1, g_log = 0, g_showFps = 0, g_fpsLimit = 0, g_profile = 1, g_batchUI = 1, g_fastDraw = 1, g_upscale = 2, g_dumpFrame = 0;
 static int g_campW, g_campH, g_batW, g_batH;   /* resolution overrides from the ini, 0 = off */
 static HWND g_hwnd;
 static WNDPROC g_origWndProc;
@@ -103,6 +103,7 @@ static void load_config(void)
     g_batchUI = GetPrivateProfileIntA("Display", "BatchUI", 1, ini);
     g_fastDraw = GetPrivateProfileIntA("Display", "FastDraw", 1, ini);
     g_upscale = GetPrivateProfileIntA("Display", "Upscale", 2, ini);
+    g_dumpFrame = GetPrivateProfileIntA("Display", "DumpFrame", 0, ini);
     if (g_upscale < 0 || g_upscale > 2) g_upscale = 2;
     if (g_fpsLimit < 0 || g_fpsLimit > 1000) g_fpsLimit = 0;
     g_campW = GetPrivateProfileIntA("Display", "CampaignWidth", 0, ini);
@@ -469,8 +470,123 @@ static const char g_usPsSmooth[] =
     "    return float4(saturate(c + c1.w * (c - b)), 1);\n"
     "}\n";
 
+static IDirect3DPixelShader9 *g_usPs[3];          /* [0] logo, [1] sharp, [2] smooth */
+
+static const char g_usPsLogo[] =
+    "sampler2D frame : register(s0);  /* the game's 800x600 frame, point */\n"
+    "sampler2D spr : register(s1);    /* exact low-res logo sprite, point, A 0 = transparent */\n"
+    "sampler2D hd : register(s2);     /* high-res logo, premultiplied, trilinear */\n"
+    "float4 c0 : register(c0);        /* frame w, h, 1/w, 1/h */\n"
+    "float4 c2 : register(c2);        /* sprite x, y, w, h in the frame */\n"
+    "float4 c3 : register(c3);        /* parchment tone behind the logo */\n"
+    "float4 main(float2 uv : TEXCOORD0) : COLOR {\n"
+    "    float2 ti = floor(uv * c2.zw);\n"
+    "    float opaque = 0, matched = 0;\n"
+    "    for (int dy = -1; dy <= 1; dy++)\n"
+    "        for (int dx = -1; dx <= 1; dx++) {\n"
+    "            float2 t = ti + float2(dx, dy) + 0.5;\n"
+    "            float4 s = tex2Dlod(spr, float4(t / c2.zw, 0, 0));\n"
+    "            float3 f = tex2Dlod(frame, float4((c2.xy + t) * c0.zw, 0, 0)).rgb;\n"
+    "            float3 d = abs(s.rgb - f);\n"
+    "            if (s.a > 0.5) { opaque += 1; if (max(d.r, max(d.g, d.b)) < 0.02) matched += 1; }\n"
+    "        }\n"
+    "    if (opaque < 0.5 || matched < opaque) return float4(0, 0, 0, 0);  /* not the logo here: keep */\n"
+    "    float4 h = tex2D(hd, uv);\n"
+    "    float centre = tex2Dlod(spr, float4((ti + 0.5) / c2.zw, 0, 0)).a;\n"
+    "    if (centre > 0.5) return float4(h.rgb + c3.rgb * (1 - h.a), 1);   /* replace the low-res logo pixel */\n"
+    "    return h;                                                          /* over the parchment */\n"
+    "}\n";
+
+/* high-res main-menu logo (frontend_files/Main_Menu/MTW_LOGO_HD.raw, written by patches/logo/build_logo.py) */
+static IDirect3DTexture9 *g_lgSpr, *g_lgHd;
+static float g_lgRect[4], g_lgTone[4];
+static int g_lgState;                  /* 0 = not loaded yet, 1 = ready, -1 = unavailable */
+
+static IDirect3DTexture9 *lg_texture(IDirect3DDevice9 *dev, UINT w, UINT h, const BYTE *bgra, int mips)
+{
+    IDirect3DTexture9 *t = NULL;
+    D3DLOCKED_RECT lr;
+    if (FAILED(IDirect3DDevice9_CreateTexture(dev, w, h, mips ? 0 : 1, mips ? D3DUSAGE_AUTOGENMIPMAP : 0,
+                                              D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &t, NULL)) &&
+        (!mips || FAILED(IDirect3DDevice9_CreateTexture(dev, w, h, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &t, NULL))))
+        return NULL;
+    if (FAILED(IDirect3DTexture9_LockRect(t, 0, &lr, NULL, 0))) { IDirect3DTexture9_Release(t); return NULL; }
+    for (UINT y = 0; y < h; y++) memcpy((BYTE *)lr.pBits + y * lr.Pitch, bgra + (size_t)y * w * 4, (size_t)w * 4);
+    IDirect3DTexture9_UnlockRect(t, 0);
+    if (mips) IDirect3DTexture9_GenerateMipSubLevels(t);
+    return t;
+}
+
+static int lg_load(IDirect3DDevice9 *dev)
+{
+    if (g_lgState) return g_lgState > 0;
+    g_lgState = -1;
+    char path[MAX_PATH];
+    snprintf(path, sizeof path, "%sfrontend_files\\Main_Menu\\MTW_LOGO_HD.raw", g_dir);
+    FILE *f = fopen(path, "rb");
+    if (!f) { logf("logo: %s not found, no high-res logo", path); return 0; }
+    UINT hdr[10];
+    BYTE *data = NULL;
+    if (fread(hdr, 4, 10, f) == 10 && !memcmp(hdr, "MRHD", 4) && hdr[1] == 1 && hdr[2] <= 1024 && hdr[3] <= 1024 &&
+        hdr[6] <= 4096 && hdr[7] <= 4096) {
+        size_t ns = (size_t)hdr[2] * hdr[3] * 4, nh = (size_t)hdr[6] * hdr[7] * 4;
+        data = malloc(ns + nh);
+        if (data && fread(data, 1, ns + nh, f) == ns + nh) {
+            g_lgSpr = lg_texture(dev, hdr[2], hdr[3], data, 0);
+            g_lgHd = lg_texture(dev, hdr[6], hdr[7], data + ns, 1);
+            g_lgRect[0] = (float)hdr[4]; g_lgRect[1] = (float)hdr[5];
+            g_lgRect[2] = (float)hdr[2]; g_lgRect[3] = (float)hdr[3];
+            g_lgTone[0] = ((hdr[8] >> 16) & 255) / 255.0f;
+            g_lgTone[1] = ((hdr[8] >> 8) & 255) / 255.0f;
+            g_lgTone[2] = (hdr[8] & 255) / 255.0f;
+            if (g_lgSpr && g_lgHd) g_lgState = 1;
+        }
+    }
+    free(data);
+    fclose(f);
+    logf("logo: high-res logo %s", g_lgState > 0 ? "loaded" : "unusable");
+    return g_lgState > 0;
+}
+
+/* second pass, inside the upscaler's scene: the high-res logo over the sprite's area */
+static void lg_draw(IDirect3DDevice9 *dev, const D3DSURFACE_DESC *bd, int dw, int dh)
+{
+    if (bd->Width != 800 || bd->Height != 600 || !g_usPs[0] || !lg_load(dev)) return;
+    float fw = (float)bd->Width, fh = (float)bd->Height;
+    float x0 = g_lgRect[0] / fw * 2 - 1, x1 = (g_lgRect[0] + g_lgRect[2]) / fw * 2 - 1;
+    float y0 = 1 - g_lgRect[1] / fh * 2, y1 = 1 - (g_lgRect[1] + g_lgRect[3]) / fh * 2;
+    float hx = 1.0f / dw, hy = 1.0f / dh;
+    float q[4][6] = {
+        { x0 - hx, y0 + hy, 0, 1, 0, 0 }, { x1 - hx, y0 + hy, 0, 1, 1, 0 },
+        { x0 - hx, y1 + hy, 0, 1, 0, 1 }, { x1 - hx, y1 + hy, 0, 1, 1, 1 },
+    };
+    IDirect3DDevice9_SetPixelShader(dev, g_usPs[0]);
+    IDirect3DDevice9_SetPixelShaderConstantF(dev, 2, g_lgRect, 1);
+    IDirect3DDevice9_SetPixelShaderConstantF(dev, 3, g_lgTone, 1);
+    IDirect3DDevice9_SetTexture(dev, 1, (IDirect3DBaseTexture9 *)g_lgSpr);
+    IDirect3DDevice9_SetTexture(dev, 2, (IDirect3DBaseTexture9 *)g_lgHd);
+    IDirect3DDevice9_SetSamplerState(dev, 0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+    IDirect3DDevice9_SetSamplerState(dev, 0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+    for (int s = 1; s < 3; s++) {
+        DWORD filt = s == 1 ? D3DTEXF_POINT : D3DTEXF_LINEAR;
+        IDirect3DDevice9_SetSamplerState(dev, s, D3DSAMP_MINFILTER, filt);
+        IDirect3DDevice9_SetSamplerState(dev, s, D3DSAMP_MAGFILTER, filt);
+        IDirect3DDevice9_SetSamplerState(dev, s, D3DSAMP_MIPFILTER, s == 2 ? D3DTEXF_LINEAR : D3DTEXF_NONE);
+        IDirect3DDevice9_SetSamplerState(dev, s, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+        IDirect3DDevice9_SetSamplerState(dev, s, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+        IDirect3DDevice9_SetSamplerState(dev, s, D3DSAMP_SRGBTEXTURE, FALSE);
+        IDirect3DDevice9_SetSamplerState(dev, s, D3DSAMP_MAXMIPLEVEL, 0);
+    }
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_ALPHABLENDENABLE, TRUE);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_SRCBLEND, D3DBLEND_ONE);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_BLENDOP, D3DBLENDOP_ADD);
+    IDirect3DDevice9_DrawPrimitiveUP(dev, D3DPT_TRIANGLESTRIP, 2, q, sizeof q[0]);
+    IDirect3DDevice9_SetTexture(dev, 1, NULL);
+    IDirect3DDevice9_SetTexture(dev, 2, NULL);
+}
+
 static IDirect3DVertexShader9 *g_usVsObj;
-static IDirect3DPixelShader9 *g_usPs[3];          /* [1] sharp, [2] smooth */
 static IDirect3DVertexDeclaration9 *g_usDecl;
 static IDirect3DSwapChain9 *g_usChain;
 static IDirect3DTexture9 *g_usTex;
@@ -511,8 +627,8 @@ static int us_setup(IDirect3DDevice9 *dev, const D3DSURFACE_DESC *bd)
         Blob *b = us_compile(g_usVs, "vs_3_0");
         if (!b || FAILED(IDirect3DDevice9_CreateVertexShader(dev, b->vt->ptr(b), &g_usVsObj))) goto fail;
         b->vt->release(b);
-        const char *src[3] = { NULL, g_usPsSharp, g_usPsSmooth };
-        for (int i = 1; i < 3; i++) {
+        const char *src[3] = { g_usPsLogo, g_usPsSharp, g_usPsSmooth };
+        for (int i = 0; i < 3; i++) {
             b = us_compile(src[i], "ps_3_0");
             if (!b || FAILED(IDirect3DDevice9_CreatePixelShader(dev, b->vt->ptr(b), &g_usPs[i]))) goto fail;
             b->vt->release(b);
@@ -556,6 +672,33 @@ fail:
     return 0;
 }
 
+/* debug (DumpFrame=1): write the 300th back buffer to frame.raw (u32 w, h, format, bytes/pixel, rows) */
+static void us_dump(IDirect3DDevice9 *dev, IDirect3DSurface9 *bb, const D3DSURFACE_DESC *bd)
+{
+    static int n;
+    if (!g_dumpFrame || ++n != 300) return;
+    UINT bpp = bd->Format == D3DFMT_R5G6B5 ? 2 : 4;
+    logf("dump: %ux%u format %d", bd->Width, bd->Height, (int)bd->Format);
+    IDirect3DSurface9 *sys = NULL;
+    D3DLOCKED_RECT lr;
+    if (FAILED(IDirect3DDevice9_CreateOffscreenPlainSurface(dev, bd->Width, bd->Height, bd->Format, D3DPOOL_SYSTEMMEM,
+                                                            &sys, NULL))) { logf("dump: no surface"); return; }
+    if (SUCCEEDED(IDirect3DDevice9_GetRenderTargetData(dev, bb, sys)) &&
+        SUCCEEDED(IDirect3DSurface9_LockRect(sys, &lr, NULL, D3DLOCK_READONLY))) {
+        char path[MAX_PATH];
+        snprintf(path, sizeof path, "%sframe.raw", g_dir);
+        FILE *f = fopen(path, "wb");
+        if (f) {
+            UINT wh[4] = { bd->Width, bd->Height, (UINT)bd->Format, bpp };
+            fwrite(wh, 4, 4, f);
+            for (UINT y = 0; y < bd->Height; y++) fwrite((BYTE *)lr.pBits + y * lr.Pitch, bpp, bd->Width, f);
+            fclose(f);
+        }
+        IDirect3DSurface9_UnlockRect(sys);
+    }
+    IDirect3DSurface9_Release(sys);
+}
+
 /* returns 1 if it presented the frame */
 static int us_present(IDirect3DDevice9 *dev)
 {
@@ -564,6 +707,7 @@ static int us_present(IDirect3DDevice9 *dev)
     int done = 0;
     if (FAILED(IDirect3DDevice9_GetBackBuffer(dev, 0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)) || !bb) return 0;
     IDirect3DSurface9_GetDesc(bb, &bd);
+    us_dump(dev, bb, &bd);
     int dw = g_dst.right - g_dst.left, dh = g_dst.bottom - g_dst.top;
     if ((int)bd.Width >= dw || (int)bd.Height >= dh || !us_setup(dev, &bd)) goto out;
 
@@ -615,6 +759,7 @@ static int us_present(IDirect3DDevice9 *dev)
     };
     if (SUCCEEDED(IDirect3DDevice9_BeginScene(dev))) {
         IDirect3DDevice9_DrawPrimitiveUP(dev, D3DPT_TRIANGLESTRIP, 2, q, sizeof q[0]);
+        lg_draw(dev, &bd, dw, dh);
         IDirect3DDevice9_EndScene(dev);
         done = SUCCEEDED(IDirect3DSwapChain9_Present(g_usChain, NULL, NULL, NULL, NULL, 0));
     }

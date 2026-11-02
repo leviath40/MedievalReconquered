@@ -24,7 +24,7 @@ patch scripts and sources; they are applied to your own install.
 - **Built-in profiler** (`profile.log`), always on, to catch regressions and find new bottlenecks.
 
 ### Look and feel
-- **New logo** on the main menu and the loading screen; main-menu parchment without the scroll
+- **New logo** on the main menu (drawn at full screen resolution with menu upscaling) and the loading screen; main-menu parchment without the scroll
   banner (`patches/logo/`).
 - **New icon** for the game and the launcher (`patches/icon/`).
 - **Boot intro skipped** (the game's own `skipcredits.txt` switch).

@@ -3,6 +3,7 @@
 Reads the untouched originals from MedievalOriginal (read-only) and writes into the game install:
   frontend_files/Load Screen.tga, frontend_files/Load Screen.BIF   (loading screen, 1280x1024)
   frontend_files/Main_Menu/MTW_LOGO.BIF                            (main menu sprite, 321x131)
+  frontend_files/Main_Menu/MTW_LOGO_HD.raw                         (high-res logo for the proxy's upscaler)
   frontend_files/Main_Menu/parch322x536_no_border.BIF              (menu parchment, scroll banner removed)
 Run from MedievalReconquered/:  python patches\\logo\\build_logo.py  [--preview DIR]
 """
@@ -185,6 +186,39 @@ def build_menu(logo, preview):
     bif.write(OUT / 'Main_Menu' / 'MTW_LOGO.BIF', [KEY] + [to565(c) for c in pal], MENU_W, MENU_H,
               index_pixels(rows, pal, offset=1), unk=old['unk'])
     if preview: bif.to_png(OUT / 'Main_Menu' / 'MTW_LOGO.BIF', preview / 'menu_logo.png')
+    build_menu_hd(logo, tone, len(lg), oy)
+
+
+HD = 4                                    # high-res logo scale (the proxy mipmaps it down to the screen size)
+MENU_POS = (239, 33)                      # where the main menu draws the logo sprite in its 800x600 frame
+
+
+def build_menu_hd(logo, tone, low_h, oy):
+    """MTW_LOGO_HD.raw for the d3d9 proxy's upscaler: it draws this high-res logo over the sprite at screen
+    resolution, wherever the frame still shows the sprite. Layout (little endian u32 unless noted):
+      'MRHD', version 1, sprite w, h, sprite x, y in the 800x600 frame, hd w, h, tone 0x00RRGGBB,
+      sprite pixels  w*h   BGRA (exact colours as the game shows them: RGB565 bit-replicated; A 0 = transparent)
+      hd pixels      hw*hh BGRA, premultiplied alpha"""
+    b = bif.read(OUT / 'Main_Menu' / 'MTW_LOGO.BIF')
+    rep = lambda c: ((c >> 11) << 3 | (c >> 11) >> 2, ((c >> 5) & 63) << 2 | ((c >> 5) & 63) >> 4,
+                     (c & 31) << 3 | (c & 31) >> 2)
+    sprite = bytearray()
+    for r in b['frames'][0]:
+        for i in r:
+            if i is None or b['pal'][i] == KEY: sprite += bytes(4)
+            else: c = rep(b['pal'][i]); sprite += bytes((c[2], c[1], c[0], 255))
+    hw, hh = MENU_W * HD, MENU_H * HD
+    lg = resize(logo, (MENU_W - 4) * HD)
+    ox, oyh = 2 * HD, oy * HD + (low_h * HD - len(lg)) // 2
+    hd = bytearray(hw * hh * 4)
+    for y, r in enumerate(lg):
+        o = ((oyh + y) * hw + ox) * 4
+        for x, (r_, g, b_, a) in enumerate(r):
+            hd[o + x * 4:o + x * 4 + 4] = bytes((min(255, round(b_)), min(255, round(g)), min(255, round(r_)),
+                                                 min(255, round(a * 255))))
+    t = round(tone[0]) << 16 | round(tone[1]) << 8 | round(tone[2])
+    hdr = b'MRHD' + struct.pack('<9I', 1, MENU_W, MENU_H, MENU_POS[0], MENU_POS[1], hw, hh, t, 0)
+    (OUT / 'Main_Menu' / 'MTW_LOGO_HD.raw').write_bytes(hdr + bytes(sprite) + bytes(hd))
 
 
 HEADER_ROWS = 58                          # scroll banner + curls + shadow at the top of the menu parchment
