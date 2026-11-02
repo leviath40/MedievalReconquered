@@ -3,6 +3,7 @@
 Reads the untouched originals from MedievalOriginal (read-only) and writes into the game install:
   frontend_files/Load Screen.tga, frontend_files/Load Screen.BIF   (loading screen, 1280x1024)
   frontend_files/Main_Menu/MTW_LOGO.BIF                            (main menu sprite, 321x131)
+  frontend_files/Main_Menu/parch322x536_no_border.BIF              (menu parchment, scroll banner removed)
 Run from MedievalReconquered/:  python patches\\logo\\build_logo.py  [--preview DIR]
 """
 import argparse, struct, sys, zlib
@@ -186,6 +187,30 @@ def build_menu(logo, preview):
     if preview: bif.to_png(OUT / 'Main_Menu' / 'MTW_LOGO.BIF', preview / 'menu_logo.png')
 
 
+HEADER_ROWS = 58                          # scroll banner + curls + shadow at the top of the menu parchment
+
+
+def build_panel(preview):
+    """Replace the scroll-banner header of the menu parchment with the flipped bottom edge (same border)."""
+    name = 'parch322x536_no_border.BIF'
+    b = bif.read(ORIG / 'Main_Menu' / name); rows = [list(r) for r in b['frames'][0]]
+    for y in range(HEADER_ROWS):
+        rows[y] = list(rows[b["h"] - 1 - y])  # bottom edge, flipped: same darkened border
+    # blend into a mirror of the rows below the seam, so the join is continuous
+    pal = [bif.rgb565(c) for c in b['pal']]; cache = {}; blend = 24
+
+    def near(c):
+        if c not in cache:
+            cache[c] = min(range(256), key=lambda i: sum((pal[i][j] - c[j]) ** 2 for j in range(3)))
+        return cache[c]
+    for y in range(HEADER_ROWS - blend, HEADER_ROWS):
+        t = (y - (HEADER_ROWS - blend) + 1) / (blend + 1); mirror = rows[2 * HEADER_ROWS - 1 - y]
+        rows[y] = [near(tuple(round(pal[v][j] * (1 - t) + pal[m][j] * t) for j in range(3)))
+                   for v, m in zip(rows[y], mirror)]
+    bif.write(OUT / 'Main_Menu' / name, b['pal'], b['w'], b['h'], rows, unk=b['unk'])
+    if preview: bif.to_png(OUT / 'Main_Menu' / name, preview / 'menu_parchment.png')
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--preview', type=Path, help='also write PNG previews of the results here')
@@ -193,6 +218,7 @@ def main():
     if a.preview: a.preview.mkdir(parents=True, exist_ok=True)
     logo = unblend(read_png(SRC)[2])
     build_menu(logo, a.preview); print('wrote Main_Menu/MTW_LOGO.BIF')
+    build_panel(a.preview); print('wrote Main_Menu/parch322x536_no_border.BIF')
     build_load_screen(logo, a.preview); print('wrote Load Screen.tga + Load Screen.BIF')
 
 
