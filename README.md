@@ -10,8 +10,8 @@ patch scripts and sources; they are applied to your own install.
   ratio kept, mouse mapped correctly; on/off switch added to the game's Video options menu.
 - **Launcher** (`patches/launcher/`): campaign map and battle resolution (any monitor mode),
   display mode, menu upscaling, FPS counter, 60 FPS cap.
-- **Sharper menus**: the 800x600 menus are upscaled with a GPU shader (Sharp or Smooth) instead of
-  a plain stretch (borderless mode).
+- **Sharper menus**: the 800x600 menus are upscaled with a GPU shader (Smooth by default, or Sharp)
+  instead of a plain stretch (borderless mode).
 - **FPS counter** at the top right of the screen (optional).
 - **Frame rate cap** at 60 FPS (optional).
 

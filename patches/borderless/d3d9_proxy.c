@@ -26,7 +26,7 @@
  *   BattleHeight=0
  *   ShowFPS=0        ; 1 = framerate counter at the top right (works in both display modes)
  *   FPSLimit=0       ; frame rate cap, e.g. 60 (0 = off; works in both display modes)
- *   Upscale=0        ; borderless: upscale low-res screens (menus) with a shader: 0 = plain stretch,
+ *   Upscale=2        ; borderless: upscale low-res screens (menus) with a shader: 0 = plain stretch,
  *                    ;   1 = sharp, 2 = smooth
  *   FastDraw=1       ; 1 = replay DrawIndexedPrimitiveUP through our own dynamic buffers (faster)
  *   BatchUI=1        ; 1 = draw the battle UI panels' 2D parts under one back-buffer lock (faster)
@@ -62,7 +62,7 @@ static PFN_GetCursorPos g_realGetCursorPos;
 static PFN_SetCursorPos g_realSetCursorPos;
 static PFN_ClipCursor g_realClipCursor;
 
-static int g_borderless = 1, g_keepAspect = 1, g_log = 0, g_showFps = 0, g_fpsLimit = 0, g_profile = 1, g_batchUI = 1, g_fastDraw = 1, g_upscale = 0;
+static int g_borderless = 1, g_keepAspect = 1, g_log = 0, g_showFps = 0, g_fpsLimit = 0, g_profile = 1, g_batchUI = 1, g_fastDraw = 1, g_upscale = 2;
 static int g_campW, g_campH, g_batW, g_batH;   /* resolution overrides from the ini, 0 = off */
 static HWND g_hwnd;
 static WNDPROC g_origWndProc;
@@ -102,8 +102,8 @@ static void load_config(void)
     g_profile = GetPrivateProfileIntA("Display", "Profile", 1, ini);
     g_batchUI = GetPrivateProfileIntA("Display", "BatchUI", 1, ini);
     g_fastDraw = GetPrivateProfileIntA("Display", "FastDraw", 1, ini);
-    g_upscale = GetPrivateProfileIntA("Display", "Upscale", 0, ini);
-    if (g_upscale < 0 || g_upscale > 2) g_upscale = 0;
+    g_upscale = GetPrivateProfileIntA("Display", "Upscale", 2, ini);
+    if (g_upscale < 0 || g_upscale > 2) g_upscale = 2;
     if (g_fpsLimit < 0 || g_fpsLimit > 1000) g_fpsLimit = 0;
     g_campW = GetPrivateProfileIntA("Display", "CampaignWidth", 0, ini);
     g_campH = GetPrivateProfileIntA("Display", "CampaignHeight", 0, ini);

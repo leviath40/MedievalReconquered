@@ -235,8 +235,8 @@ static void fill_controls(void)
     SendMessageA(g_up, CB_ADDSTRING, 0, (LPARAM)"Original (plain stretch)");
     SendMessageA(g_up, CB_ADDSTRING, 0, (LPARAM)"Sharp");
     SendMessageA(g_up, CB_ADDSTRING, 0, (LPARAM)"Smooth");
-    int up = GetPrivateProfileIntA("Display", "Upscale", 0, g_ini);
-    SendMessageA(g_up, CB_SETCURSEL, up >= 0 && up <= 2 ? up : 0, 0);
+    int up = GetPrivateProfileIntA("Display", "Upscale", 2, g_ini);
+    SendMessageA(g_up, CB_SETCURSEL, up >= 0 && up <= 2 ? up : 2, 0);
     SendMessageA(g_fps, BM_SETCHECK, GetPrivateProfileIntA("Display", "ShowFPS", 0, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageA(g_limit, BM_SETCHECK, GetPrivateProfileIntA("Display", "FPSLimit", 0, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
 }
