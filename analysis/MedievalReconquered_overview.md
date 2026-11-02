@@ -426,3 +426,8 @@ Third pass, 2026-11-01, for the borderless fullscreen patch (`patches/borderless
 - 0x6DE4BE–0x6DE565: clamps the cfg indices to the counts (copies in 0xE7D1F0 battle / 0xE7D1F4 campaign) and writes width/height into 0x7A2780/0x7A2788. `FUN_006de850(dev, w, h, battle)` snaps a size to the closest listed mode. The Video menu sliders write the same globals (0x70CC52, 0x70CE21).
 - The borderless proxy hooks 0x6DE4BE (`mov edx,[0xE77B04]`, 6 bytes → call + nop) to write the indices matching `CampaignWidth/Height` and `BattleWidth/Height` from the ini, once at startup. Play-tested.
 
+## 8. Boot intro **[confirmed]** (2026-11-02)
+
+- `FUN_006be3e0` (`credits.cpp`, called once at 0x6D5931) plays the boot sequence: `Credits\Legals\TotalWar.Mpg`, then `Credits\Legals\intro.mpg` (another TotalWar.Mpg branch when `[esp+0x14] == 5`), then the `Legals.Bp8` screen. Movies: `new` object, constructor 0x417B70(path), frame loop on 0x417D10 until it returns false or the skip flag `[0x8DCD11]` is set.
+- Built-in skip: the function first calls `FUN_00408fc0("skipcredits.txt", 0)` (`_access` != -1); if the file exists in the game folder, the whole sequence is skipped. The repo ships an empty `skipcredits.txt` for that. Play-tested.
+
