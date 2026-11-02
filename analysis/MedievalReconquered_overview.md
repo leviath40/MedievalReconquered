@@ -385,9 +385,6 @@ There are 23 direct call/jmp sites in the original `.text`, and no data pointers
 2. **Unit-size scaling:** follow the readers of `+0x344` (base_unitsize) and the `unitsize_scalable` handler (0x733C00). Find the Small/Normal/Large/Huge multipliers stored in `Medieval.Cfg`.
 3. **Faction cap:** confirm that the 96-dword array at 0xF31FB8 is indexed by faction id × period, and look for other arrays sized 32 / 0x20 (rendering colours, banners, AI personalities).
 4. **Province cap:** inspect `cregion.cpp` / `startpos.cpp` code. `startpos.cpp` checks a keyword with id 0x49 and compares a value against **0x32 (50)** in `FUN_00642140`; check whether that is a region or neighbour limit.
-5. ~~Army stack limit (20 units)~~: dropped, not a project goal. Findings so far:
-   - Ruled out: `maxunits` (0x7B2678) is a key in the formation data files (read in `FUN_0044f4d0` with `minunits`/`arrangeinrow`).
-   - Ruled out: `generals_army_size` (0x7C3DF8) is only a UI text key (`FUN_005908a0`).
 6. ~~Proteus layer~~: done, see section 5.
 6b. **Region-dependent fixed arrays:** the region array itself is dynamic (section 4). Check bitsets and arrays indexed by region id (AI, trade, `startpos.cpp` value 0x32) for a hidden cap.
 7. **Config transform** `FUN_00409010` / flag `DAT_0079c8e8`: is it encryption, or a no-op?
