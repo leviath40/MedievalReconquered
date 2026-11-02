@@ -26,6 +26,8 @@
  *   BattleHeight=0
  *   ShowFPS=0        ; 1 = framerate counter at the top right (works in both display modes)
  *   FPSLimit=0       ; frame rate cap, e.g. 60 (0 = off; works in both display modes)
+ *   Upscale=0        ; borderless: upscale low-res screens (menus) with a shader: 0 = plain stretch,
+ *                    ;   1 = sharp, 2 = smooth
  *   FastDraw=1       ; 1 = replay DrawIndexedPrimitiveUP through our own dynamic buffers (faster)
  *   BatchUI=1        ; 1 = draw the battle UI panels' 2D parts under one back-buffer lock (faster)
  *   Profile=1        ; 1 = write profile.log: per-second breakdown of frame time (on by default,
@@ -60,7 +62,7 @@ static PFN_GetCursorPos g_realGetCursorPos;
 static PFN_SetCursorPos g_realSetCursorPos;
 static PFN_ClipCursor g_realClipCursor;
 
-static int g_borderless = 1, g_keepAspect = 1, g_log = 0, g_showFps = 0, g_fpsLimit = 0, g_profile = 1, g_batchUI = 1, g_fastDraw = 1;
+static int g_borderless = 1, g_keepAspect = 1, g_log = 0, g_showFps = 0, g_fpsLimit = 0, g_profile = 1, g_batchUI = 1, g_fastDraw = 1, g_upscale = 0;
 static int g_campW, g_campH, g_batW, g_batH;   /* resolution overrides from the ini, 0 = off */
 static HWND g_hwnd;
 static WNDPROC g_origWndProc;
@@ -100,6 +102,8 @@ static void load_config(void)
     g_profile = GetPrivateProfileIntA("Display", "Profile", 1, ini);
     g_batchUI = GetPrivateProfileIntA("Display", "BatchUI", 1, ini);
     g_fastDraw = GetPrivateProfileIntA("Display", "FastDraw", 1, ini);
+    g_upscale = GetPrivateProfileIntA("Display", "Upscale", 0, ini);
+    if (g_upscale < 0 || g_upscale > 2) g_upscale = 0;
     if (g_fpsLimit < 0 || g_fpsLimit > 1000) g_fpsLimit = 0;
     g_campW = GetPrivateProfileIntA("Display", "CampaignWidth", 0, ini);
     g_campH = GetPrivateProfileIntA("Display", "CampaignHeight", 0, ini);
@@ -272,6 +276,8 @@ static void install_hooks(void)
 
 /* ------------------------------------------------------------------ D3D9 hooks */
 
+static UINT g_presentInterval;
+
 static void make_windowed(D3DPRESENT_PARAMETERS *pp)
 {
     logf("requested: %ux%u fmt %d windowed %d swap %d refresh %u flags %#x",
@@ -279,6 +285,7 @@ static void make_windowed(D3DPRESENT_PARAMETERS *pp)
          pp->SwapEffect, pp->FullScreen_RefreshRateInHz, pp->Flags);
     g_bbW = pp->BackBufferWidth;
     g_bbH = pp->BackBufferHeight;
+    g_presentInterval = pp->PresentationInterval;
     pp->Windowed = TRUE;
     pp->FullScreen_RefreshRateInHz = 0;
     if (pp->hDeviceWindow) g_hwnd = pp->hDeviceWindow;
@@ -400,9 +407,235 @@ static void fd_install(IDirect3DDevice9 *dev)
     logf("fastdraw: DrawIndexedPrimitiveUP redirected");
 }
 
+/* ------------------------------------------------------------------ menu upscaling (Upscale=1/2)
+ *
+ * Borderless only. When the game's back buffer is smaller than the image area on the monitor (the
+ * 800x600 front end), Present is replaced by: copy the back buffer into a texture, draw it with a
+ * pixel shader into our own swap chain at monitor size (black bars outside g_dst), present that.
+ *   1 = Sharp:  "sharp bilinear" (integer prescale, then a 1-texel-wide linear blend at texel edges)
+ *   2 = Smooth: Catmull-Rom bicubic + light unsharp mask
+ * Shaders are HLSL compiled at startup with the system d3dcompiler_47.dll. The game's render states
+ * are captured/restored with a state block; render target and depth surface are saved and restored.
+ * D3DPOOL_DEFAULT objects are released before Reset and recreated on demand.
+ */
+typedef HRESULT (WINAPI *PFN_D3DCompile)(const void *, SIZE_T, const char *, const void *, void *, const char *,
+                                         const char *, UINT, UINT, void **, void **);
+typedef struct { void *(STDMETHODCALLTYPE *qi)(void *); ULONG (STDMETHODCALLTYPE *addref)(void *);
+                 ULONG (STDMETHODCALLTYPE *release)(void *); void *(STDMETHODCALLTYPE *ptr)(void *);
+                 SIZE_T (STDMETHODCALLTYPE *size)(void *); } BlobVtbl;
+typedef struct { BlobVtbl *vt; } Blob;
+
+static const char g_usVs[] =
+    "struct V { float4 p : POSITION; float2 t : TEXCOORD0; };\n"
+    "V main(V v) { return v; }\n";
+
+static const char g_usPsSharp[] =
+    "sampler2D s0 : register(s0);\n"
+    "float4 c0 : register(c0);  /* tex w, h, 1/w, 1/h */\n"
+    "float4 c1 : register(c1);  /* out w, h, prescale, sharpen */\n"
+    "float4 main(float2 uv : TEXCOORD0) : COLOR {\n"
+    "    float2 texel = uv * c0.xy;\n"
+    "    float2 base = floor(texel);\n"
+    "    float2 d = frac(texel) - 0.5;\n"
+    "    float r = 0.5 - 0.5 / c1.z;\n"
+    "    float2 f = (d - clamp(d, -r, r)) * c1.z + 0.5;\n"
+    "    return float4(tex2D(s0, (base + f) * c0.zw).rgb, 1);\n"
+    "}\n";
+
+static const char g_usPsSmooth[] =
+    "sampler2D s0 : register(s0);\n"
+    "float4 c0 : register(c0);\n"
+    "float4 c1 : register(c1);\n"
+    "float4 main(float2 uv : TEXCOORD0) : COLOR {\n"
+    "    float2 sp = uv * c0.xy;\n"
+    "    float2 t1 = floor(sp - 0.5) + 0.5;\n"
+    "    float2 f = sp - t1;\n"
+    "    float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));\n"
+    "    float2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);\n"
+    "    float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));\n"
+    "    float2 w3 = f * f * (-0.5 + 0.5 * f);\n"
+    "    float2 w12 = w1 + w2;\n"
+    "    float2 p0 = (t1 - 1) * c0.zw, p3 = (t1 + 2) * c0.zw, p12 = (t1 + w2 / w12) * c0.zw;\n"
+    "    float3 c = tex2D(s0, float2(p0.x, p0.y)).rgb * w0.x * w0.y\n"
+    "             + tex2D(s0, float2(p12.x, p0.y)).rgb * w12.x * w0.y\n"
+    "             + tex2D(s0, float2(p3.x, p0.y)).rgb * w3.x * w0.y\n"
+    "             + tex2D(s0, float2(p0.x, p12.y)).rgb * w0.x * w12.y\n"
+    "             + tex2D(s0, float2(p12.x, p12.y)).rgb * w12.x * w12.y\n"
+    "             + tex2D(s0, float2(p3.x, p12.y)).rgb * w3.x * w12.y\n"
+    "             + tex2D(s0, float2(p0.x, p3.y)).rgb * w0.x * w3.y\n"
+    "             + tex2D(s0, float2(p12.x, p3.y)).rgb * w12.x * w3.y\n"
+    "             + tex2D(s0, float2(p3.x, p3.y)).rgb * w3.x * w3.y;\n"
+    "    float3 b = tex2D(s0, uv).rgb;\n"
+    "    return float4(saturate(c + c1.w * (c - b)), 1);\n"
+    "}\n";
+
+static IDirect3DVertexShader9 *g_usVsObj;
+static IDirect3DPixelShader9 *g_usPs[3];          /* [1] sharp, [2] smooth */
+static IDirect3DVertexDeclaration9 *g_usDecl;
+static IDirect3DSwapChain9 *g_usChain;
+static IDirect3DTexture9 *g_usTex;
+static IDirect3DStateBlock9 *g_usState;
+static UINT g_usTexW, g_usTexH;
+static int g_usBroken;                            /* setup failed: plain Present from now on */
+
+static void us_release(void)
+{
+    if (g_usChain) { IDirect3DSwapChain9_Release(g_usChain); g_usChain = NULL; }
+    if (g_usTex) { IDirect3DTexture9_Release(g_usTex); g_usTex = NULL; }
+    if (g_usState) { IDirect3DStateBlock9_Release(g_usState); g_usState = NULL; }
+}
+
+static void *us_compile(const char *src, const char *target)
+{
+    static PFN_D3DCompile compile;
+    if (!compile) {
+        HMODULE m = LoadLibraryA("d3dcompiler_47.dll");
+        compile = m ? (PFN_D3DCompile)GetProcAddress(m, "D3DCompile") : NULL;
+        if (!compile) { logf("upscale: d3dcompiler_47.dll not available"); return NULL; }
+    }
+    Blob *code = NULL, *err = NULL;
+    HRESULT hr = compile(src, strlen(src), "upscale", NULL, NULL, "main", target, 0, 0, (void **)&code, (void **)&err);
+    if (FAILED(hr)) {
+        logf("upscale: %s compile failed: %s", target, err ? (const char *)err->vt->ptr(err) : "?");
+        if (err) err->vt->release(err);
+        return NULL;
+    }
+    if (err) err->vt->release(err);
+    return code;
+}
+
+static int us_setup(IDirect3DDevice9 *dev, const D3DSURFACE_DESC *bd)
+{
+    if (g_usBroken) return 0;
+    if (!g_usVsObj) {
+        Blob *b = us_compile(g_usVs, "vs_3_0");
+        if (!b || FAILED(IDirect3DDevice9_CreateVertexShader(dev, b->vt->ptr(b), &g_usVsObj))) goto fail;
+        b->vt->release(b);
+        const char *src[3] = { NULL, g_usPsSharp, g_usPsSmooth };
+        for (int i = 1; i < 3; i++) {
+            b = us_compile(src[i], "ps_3_0");
+            if (!b || FAILED(IDirect3DDevice9_CreatePixelShader(dev, b->vt->ptr(b), &g_usPs[i]))) goto fail;
+            b->vt->release(b);
+        }
+        static const D3DVERTEXELEMENT9 el[] = {
+            { 0, 0, D3DDECLTYPE_FLOAT4, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_POSITION, 0 },
+            { 0, 16, D3DDECLTYPE_FLOAT2, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_TEXCOORD, 0 },
+            D3DDECL_END()
+        };
+        if (FAILED(IDirect3DDevice9_CreateVertexDeclaration(dev, el, &g_usDecl))) goto fail;
+    }
+    UINT mw = (UINT)(g_mon.right - g_mon.left), mh = (UINT)(g_mon.bottom - g_mon.top);
+    if (!g_usChain) {
+        D3DPRESENT_PARAMETERS pp = { 0 };
+        pp.BackBufferWidth = mw;
+        pp.BackBufferHeight = mh;
+        pp.BackBufferFormat = D3DFMT_UNKNOWN;
+        pp.BackBufferCount = 1;
+        pp.SwapEffect = D3DSWAPEFFECT_DISCARD;
+        pp.hDeviceWindow = g_hwnd;
+        pp.Windowed = TRUE;
+        pp.PresentationInterval = g_presentInterval;
+        if (FAILED(IDirect3DDevice9_CreateAdditionalSwapChain(dev, &pp, &g_usChain))) { g_usChain = NULL; goto fail; }
+    }
+    if (g_usTex && (g_usTexW != bd->Width || g_usTexH != bd->Height)) {
+        IDirect3DTexture9_Release(g_usTex);
+        g_usTex = NULL;
+    }
+    if (!g_usTex) {
+        if (FAILED(IDirect3DDevice9_CreateTexture(dev, bd->Width, bd->Height, 1, D3DUSAGE_RENDERTARGET, bd->Format,
+                                                  D3DPOOL_DEFAULT, &g_usTex, NULL))) { g_usTex = NULL; goto fail; }
+        g_usTexW = bd->Width;
+        g_usTexH = bd->Height;
+    }
+    if (!g_usState && FAILED(IDirect3DDevice9_CreateStateBlock(dev, D3DSBT_ALL, &g_usState))) { g_usState = NULL; goto fail; }
+    return 1;
+fail:
+    logf("upscale: setup failed, using the plain stretch");
+    g_usBroken = 1;
+    us_release();
+    return 0;
+}
+
+/* returns 1 if it presented the frame */
+static int us_present(IDirect3DDevice9 *dev)
+{
+    IDirect3DSurface9 *bb = NULL, *texSurf = NULL, *out = NULL, *oldRt = NULL, *oldDs = NULL;
+    D3DSURFACE_DESC bd;
+    int done = 0;
+    if (FAILED(IDirect3DDevice9_GetBackBuffer(dev, 0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)) || !bb) return 0;
+    IDirect3DSurface9_GetDesc(bb, &bd);
+    int dw = g_dst.right - g_dst.left, dh = g_dst.bottom - g_dst.top;
+    if ((int)bd.Width >= dw || (int)bd.Height >= dh || !us_setup(dev, &bd)) goto out;
+
+    IDirect3DStateBlock9_Capture(g_usState);
+    IDirect3DDevice9_GetRenderTarget(dev, 0, &oldRt);
+    IDirect3DDevice9_GetDepthStencilSurface(dev, &oldDs);
+    IDirect3DTexture9_GetSurfaceLevel(g_usTex, 0, &texSurf);
+    IDirect3DSwapChain9_GetBackBuffer(g_usChain, 0, D3DBACKBUFFER_TYPE_MONO, &out);
+    if (!texSurf || !out || FAILED(IDirect3DDevice9_StretchRect(dev, bb, NULL, texSurf, NULL, D3DTEXF_POINT)))
+        goto restore;
+
+    IDirect3DDevice9_SetRenderTarget(dev, 0, out);
+    IDirect3DDevice9_SetDepthStencilSurface(dev, NULL);
+    IDirect3DDevice9_Clear(dev, 0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, 0, 0), 1.0f, 0);
+    D3DVIEWPORT9 vp = { (DWORD)g_dst.left, (DWORD)g_dst.top, (DWORD)dw, (DWORD)dh, 0.0f, 1.0f };
+    IDirect3DDevice9_SetViewport(dev, &vp);
+    IDirect3DDevice9_SetVertexDeclaration(dev, g_usDecl);
+    IDirect3DDevice9_SetVertexShader(dev, g_usVsObj);
+    IDirect3DDevice9_SetPixelShader(dev, g_usPs[g_upscale]);
+    IDirect3DDevice9_SetTexture(dev, 0, (IDirect3DBaseTexture9 *)g_usTex);
+    for (int s = 0; s < 1; s++) {
+        IDirect3DDevice9_SetSamplerState(dev, s, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+        IDirect3DDevice9_SetSamplerState(dev, s, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+        IDirect3DDevice9_SetSamplerState(dev, s, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+        IDirect3DDevice9_SetSamplerState(dev, s, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+        IDirect3DDevice9_SetSamplerState(dev, s, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+        IDirect3DDevice9_SetSamplerState(dev, s, D3DSAMP_SRGBTEXTURE, FALSE);
+    }
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_ZENABLE, FALSE);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_ZWRITEENABLE, FALSE);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_ALPHABLENDENABLE, FALSE);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_ALPHATESTENABLE, FALSE);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_CULLMODE, D3DCULL_NONE);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_SCISSORTESTENABLE, FALSE);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_STENCILENABLE, FALSE);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_FOGENABLE, FALSE);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_SRGBWRITEENABLE, FALSE);
+    IDirect3DDevice9_SetRenderState(dev, D3DRS_COLORWRITEENABLE, 0xF);
+    float prescale = (float)(dh / (int)bd.Height);
+    if (prescale < 1) prescale = 1;
+    float c[8] = { (float)bd.Width, (float)bd.Height, 1.0f / bd.Width, 1.0f / bd.Height,
+                   (float)dw, (float)dh, prescale, 0.35f };
+    IDirect3DDevice9_SetPixelShaderConstantF(dev, 0, c, 2);
+    /* full-viewport quad, shifted half a pixel (D3D9 pixel centres) */
+    float hx = 1.0f / dw, hy = 1.0f / dh;
+    float q[4][6] = {
+        { -1 - hx,  1 + hy, 0, 1, 0, 0 }, { 1 - hx,  1 + hy, 0, 1, 1, 0 },
+        { -1 - hx, -1 + hy, 0, 1, 0, 1 }, { 1 - hx, -1 + hy, 0, 1, 1, 1 },
+    };
+    if (SUCCEEDED(IDirect3DDevice9_BeginScene(dev))) {
+        IDirect3DDevice9_DrawPrimitiveUP(dev, D3DPT_TRIANGLESTRIP, 2, q, sizeof q[0]);
+        IDirect3DDevice9_EndScene(dev);
+        done = SUCCEEDED(IDirect3DSwapChain9_Present(g_usChain, NULL, NULL, NULL, NULL, 0));
+    }
+restore:
+    IDirect3DDevice9_SetTexture(dev, 0, NULL);
+    if (oldRt) IDirect3DDevice9_SetRenderTarget(dev, 0, oldRt);
+    IDirect3DDevice9_SetDepthStencilSurface(dev, oldDs);
+    IDirect3DStateBlock9_Apply(g_usState);
+out:
+    if (texSurf) IDirect3DSurface9_Release(texSurf);
+    if (out) IDirect3DSurface9_Release(out);
+    if (oldRt) IDirect3DSurface9_Release(oldRt);
+    if (oldDs) IDirect3DSurface9_Release(oldDs);
+    IDirect3DSurface9_Release(bb);
+    return done;
+}
+
 static HRESULT STDMETHODCALLTYPE hk_Reset(IDirect3DDevice9 *dev, D3DPRESENT_PARAMETERS *pp)
 {
-    fd_release();                 /* our D3DPOOL_DEFAULT buffers must go before Reset */
+    fd_release();
+    us_release();                 /* our D3DPOOL_DEFAULT buffers must go before Reset */
     if (!g_borderless) return g_origReset(dev, pp);
     D3DPRESENT_PARAMETERS mine = *pp;
     make_windowed(&mine);
@@ -876,6 +1109,12 @@ static void prof_frame(LONGLONG now)
     g_pSecStart = now;
 }
 
+static HRESULT present_frame(IDirect3DDevice9 *dev, const RECT *src, const RECT *dst, HWND wnd, const RGNDATA *dirty)
+{
+    if (g_borderless && g_upscale && !src && !wnd && us_present(dev)) return D3D_OK;
+    return g_origPresent(dev, src, dst, wnd, dirty);
+}
+
 static HRESULT STDMETHODCALLTYPE hk_Present(IDirect3DDevice9 *dev, const RECT *src, const RECT *dst,
                                             HWND wnd, const RGNDATA *dirty)
 {
@@ -888,8 +1127,8 @@ static HRESULT STDMETHODCALLTYPE hk_Present(IDirect3DDevice9 *dev, const RECT *s
     }
     if (g_showFps) draw_fps(dev);
     if (g_borderless && !dst) dst = &g_dst;
-    if (!g_profile) return g_origPresent(dev, src, dst, wnd, dirty);
-    TIMED(A_PRESENT, g_origPresent(dev, src, dst, wnd, dirty));
+    if (!g_profile) return present_frame(dev, src, dst, wnd, dirty);
+    TIMED(A_PRESENT, present_frame(dev, src, dst, wnd, dirty));
     prof_frame(qpc());
     return hr;
 }
