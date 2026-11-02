@@ -431,3 +431,8 @@ Third pass, 2026-11-01, for the borderless fullscreen patch (`patches/borderless
 - `FUN_006be3e0` (`credits.cpp`, called once at 0x6D5931) plays the boot sequence: `Credits\Legals\TotalWar.Mpg`, then `Credits\Legals\intro.mpg` (another TotalWar.Mpg branch when `[esp+0x14] == 5`), then the `Legals.Bp8` screen. Movies: `new` object, constructor 0x417B70(path), frame loop on 0x417D10 until it returns false or the skip flag `[0x8DCD11]` is set.
 - Built-in skip: the function first calls `FUN_00408fc0("skipcredits.txt", 0)` (`_access` != -1); if the file exists in the game folder, the whole sequence is skipped. The repo ships an empty `skipcredits.txt` for that. Play-tested.
 
+
+## 9. BIF sprites and the logo (2026-11-02)
+
+- `.bif` loader: `FUN_00402240` (`bifstuff.cpp`) dispatches on extension (`Bif`/`Tga`/`Lbm`); Bif files are read whole (`FUN_004090a0`) and decoded per frame by `FUN_0073d9eb`. Format: 256 × u16 RGB565 palette, then u32 width, height, unknown (0x6A on 1-frame frontend art), frames, 1, then frame offsets relative to 0x214. Each row: u16 byte length (incl. itself), then RLE ops: `00 n` skip n, `c<0x80 v` repeat v c+1 times, `c>=0x80` literal run of 256-c bytes. Magenta (`0xF81F`) maps to transparent. Codec: `tools/bif.py`.
+- Logos: main menu `frontend_files/Main_Menu/MTW_LOGO.BIF` (321×131 sprite), loading screen `frontend_files/Load Screen.tga` and `Load Screen.BIF` (1280×1024; the exe references both). `patches/logo/build_logo.py` rebuilds all three from the originals plus `patches/logo/logo_src.png`. Shipped game art had no transparent pixels, so the new transparent menu sprite (skip ops + magenta index 0) needs a visual check in game.
