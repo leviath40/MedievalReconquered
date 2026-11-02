@@ -34,8 +34,37 @@ static char g_dir[MAX_PATH], g_ini[MAX_PATH];
 static HWND g_camp, g_res, g_mode;    /* g_res: battle resolution */
 static BYTE *g_bgBits;                /* 24-bit bottom-up pixels, DIB layout */
 static BITMAPINFO g_bgInfo;
-static HFONT g_titleFont, g_labelFont;
+static HFONT g_labelFont;
 static HICON g_emblem;
+static HDC g_logoDC;                  /* title logo, premultiplied 32-bit, for AlphaBlend */
+static int g_logoW, g_logoH;
+
+/* Resource 2: logo.bmp, 32-bit top-down BGRA with straight alpha (see build.py). */
+static void load_logo(HINSTANCE inst)
+{
+    HRSRC r = FindResourceA(inst, MAKEINTRESOURCEA(2), (LPCSTR)RT_RCDATA);
+    BYTE *bmp = r ? LockResource(LoadResource(inst, r)) : NULL;
+    if (!bmp || SizeofResource(inst, r) < 54 || bmp[0] != 'B' || bmp[1] != 'M') return;
+    BITMAPINFOHEADER *bih = (BITMAPINFOHEADER *)(bmp + 14);
+    if (bih->biBitCount != 32 || bih->biCompression != BI_RGB) return;
+    int w = bih->biWidth, h = abs(bih->biHeight);
+    BYTE *src = bmp + *(DWORD *)(bmp + 10);
+    BITMAPINFO bi = { .bmiHeader = *bih };
+    void *bits;
+    HBITMAP dib = CreateDIBSection(NULL, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+    if (!dib) return;
+    BYTE *d = bits;
+    for (int i = 0; i < w * h; i++, d += 4, src += 4) {
+        d[0] = (BYTE)(src[0] * src[3] / 255);
+        d[1] = (BYTE)(src[1] * src[3] / 255);
+        d[2] = (BYTE)(src[2] * src[3] / 255);
+        d[3] = src[3];
+    }
+    g_logoDC = CreateCompatibleDC(NULL);
+    SelectObject(g_logoDC, dib);
+    g_logoW = w;
+    g_logoH = h;
+}
 
 /* Uncompressed 24-bit TGA (type 2), the layout the game's frontend files use. */
 static void load_background(void)
@@ -88,12 +117,16 @@ static void paint(HWND win)
     SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, g_bgBits ? RGB(70, 40, 20) : GetSysColor(COLOR_BTNTEXT));
     if (g_emblem) DrawIconEx(dc, (CLIENT_W - 72) / 2, 52, g_emblem, 72, 72, 0, NULL, DI_NORMAL);
-    HFONT oldFont = SelectObject(dc, g_titleFont);
-    text_at(dc, "Medieval Reconquered", 0, 128, CLIENT_W, 36, DT_CENTER);
-    SelectObject(dc, g_labelFont);
-    text_at(dc, "Campaign map:", 100, 182, 130, 24, DT_LEFT);
-    text_at(dc, "Battle:", 100, 217, 130, 24, DT_LEFT);
-    text_at(dc, "Display mode:", 100, 252, 130, 24, DT_LEFT);
+    HFONT oldFont = SelectObject(dc, g_labelFont);
+    if (g_logoDC) {
+        BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+        AlphaBlend(dc, (CLIENT_W - g_logoW) / 2, 128, g_logoW, g_logoH, g_logoDC, 0, 0, g_logoW, g_logoH, bf);
+    } else {
+        text_at(dc, "Medieval Reconquered", 0, 128, CLIENT_W, 36, DT_CENTER);
+    }
+    text_at(dc, "Campaign map:", 100, 214, 130, 24, DT_LEFT);
+    text_at(dc, "Battle:", 100, 247, 130, 24, DT_LEFT);
+    text_at(dc, "Display mode:", 100, 280, 130, 24, DT_LEFT);
     SelectObject(dc, oldFont);
     BitBlt(wdc, 0, 0, CLIENT_W, CLIENT_H, dc, 0, 0, SRCCOPY);
     SelectObject(dc, oldBmp);
@@ -192,11 +225,11 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
     case WM_CREATE:
-        g_camp = add(h, "COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 240, 182, 180, 300, ID_CAMP);
-        g_res = add(h, "COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 240, 217, 180, 300, ID_RES);
-        g_mode = add(h, "COMBOBOX", "", CBS_DROPDOWNLIST | WS_TABSTOP, 240, 252, 180, 100, ID_MODE);
-        add(h, "BUTTON", "Play", BS_DEFPUSHBUTTON | WS_TABSTOP, 150, 312, 100, 30, ID_PLAY);
-        add(h, "BUTTON", "Quit", WS_TABSTOP, 270, 312, 100, 30, ID_QUIT);
+        g_camp = add(h, "COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 240, 214, 180, 300, ID_CAMP);
+        g_res = add(h, "COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 240, 247, 180, 300, ID_RES);
+        g_mode = add(h, "COMBOBOX", "", CBS_DROPDOWNLIST | WS_TABSTOP, 240, 280, 180, 100, ID_MODE);
+        add(h, "BUTTON", "Play", BS_DEFPUSHBUTTON | WS_TABSTOP, 150, 320, 100, 30, ID_PLAY);
+        add(h, "BUTTON", "Quit", WS_TABSTOP, 270, 320, 100, 30, ID_QUIT);
         fill_controls();
         return 0;
     case WM_ERASEBKGND:
@@ -228,8 +261,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     list_modes();
     load_background();
     g_emblem = LoadImageA(inst, MAKEINTRESOURCEA(1), IMAGE_ICON, 72, 72, 0);
-    g_titleFont = CreateFontA(30, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY,
-                              0, "Georgia");
+    load_logo(inst);
     g_labelFont = CreateFontA(17, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY,
                               0, "Georgia");
 

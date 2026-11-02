@@ -26,14 +26,15 @@ def main():
         print(f"removed {target}")
         return
     OUT.parent.mkdir(exist_ok=True)
-    srcs = [str(HERE / "launcher.c")]
-    if ICON.exists():
-        (OUT.parent / "app.ico").write_bytes(ICON.read_bytes())
-        rc = OUT.parent / "launcher.rc"
-        rc.write_text('1 ICON "app.ico"\n')
-        srcs.append(str(rc))
+    # resources: 1 = icon, 2 = title logo (copied next to the .rc: the resource compiler
+    # resolves plain file names only)
+    (OUT.parent / "app.ico").write_bytes(ICON.read_bytes())
+    (OUT.parent / "logo.bmp").write_bytes((HERE / "logo.bmp").read_bytes())
+    rc = OUT.parent / "launcher.rc"
+    rc.write_text('1 ICON "app.ico"\n2 RCDATA "logo.bmp"\n')
+    srcs = [str(HERE / "launcher.c"), str(rc)]
     cmd = [find_zig(), "cc", "-target", "x86-windows-gnu", "-O2", "-s", "-Wl,--subsystem,windows",
-           "-o", str(OUT), *srcs, "-luser32", "-lgdi32"]
+           "-o", str(OUT), *srcs, "-luser32", "-lgdi32", "-lmsimg32"]
     subprocess.run(cmd, check=True)
     target.write_bytes(OUT.read_bytes())
     print(f"installed {target}")

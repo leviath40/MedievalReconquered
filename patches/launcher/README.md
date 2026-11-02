@@ -14,7 +14,8 @@ python patches\launcher\build.py            # build, install MedievalReconquered
 python patches\launcher\build.py --remove   # uninstall
 ```
 
-The icon is `patches/icon/MedievalReconquered.ico`.
+The icon is `patches/icon/MedievalReconquered.ico`. The title logo is `logo.bmp` (32-bit BGRA with alpha, 300×74),
+embedded as resource 2.
 
 ## How it works
 
