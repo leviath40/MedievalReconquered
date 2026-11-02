@@ -473,10 +473,61 @@ static HRESULT STDMETHODCALLTYPE pk_TexLock(void *t, UINT lvl, D3DLOCKED_RECT *l
     return hr;
 }
 
+/* surface locks by call site + surface kind, dumped every 10 s (top entries by time) */
+typedef struct { void *caller; D3DSURFACE_DESC d; DWORD flags; LONG rw, rh; LONGLONG t; unsigned n; } SiteStat;
+static SiteStat g_sites[64];
+static unsigned g_drawKind[4];
+static LONGLONG g_drawKindT[4];
+
+static void site_add(void *caller, const D3DSURFACE_DESC *d, DWORD flags, const RECT *r, LONGLONG t)
+{
+    LONG rw = r ? r->right - r->left : -1, rh = r ? r->bottom - r->top : -1;
+    for (int i = 0; i < 64; i++) {
+        SiteStat *e = &g_sites[i];
+        if (e->n && (e->caller != caller || e->flags != flags || e->rw != rw || e->rh != rh ||
+                     e->d.Format != d->Format || e->d.Usage != d->Usage || e->d.Pool != d->Pool ||
+                     e->d.Width != d->Width || e->d.Height != d->Height))
+            continue;
+        if (!e->n) { e->caller = caller; e->d = *d; e->flags = flags; e->rw = rw; e->rh = rh; }
+        e->n++;
+        e->t += t;
+        return;
+    }
+}
+
+static void sites_dump(FILE *f)
+{
+    double ms = 1000.0 / (double)g_pFreq.QuadPart;
+    fprintf(f, "  surface locks, last 10 s (caller fmt usage pool WxH flags rect: calls, total ms, ms/call):\n");
+    for (int k = 0; k < 10; k++) {
+        int best = -1;
+        for (int i = 0; i < 64; i++)
+            if (g_sites[i].n && (best < 0 || g_sites[i].t > g_sites[best].t)) best = i;
+        if (best < 0) break;
+        SiteStat *e = &g_sites[best];
+        fprintf(f, "    %p fmt %d usage %#lx pool %d %ux%u flags %#lx rect %ldx%ld: %u, %.1f, %.3f\n", e->caller,
+                (int)e->d.Format, e->d.Usage, (int)e->d.Pool, e->d.Width, e->d.Height, e->flags, e->rw, e->rh,
+                e->n, (double)e->t * ms, (double)e->t * ms / e->n);
+        e->n = 0;
+        e->t = 0;
+    }
+    memset(g_sites, 0, sizeof g_sites);
+    fprintf(f, "  draws, last 10 s (DP/DIP/DPUP/DIPUP: calls, total ms): %u %.0f / %u %.0f / %u %.0f / %u %.0f\n",
+            g_drawKind[0], (double)g_drawKindT[0] * ms, g_drawKind[1], (double)g_drawKindT[1] * ms,
+            g_drawKind[2], (double)g_drawKindT[2] * ms, g_drawKind[3], (double)g_drawKindT[3] * ms);
+    memset(g_drawKind, 0, sizeof g_drawKind);
+    memset(g_drawKindT, 0, sizeof g_drawKindT);
+}
+
+typedef HRESULT (STDMETHODCALLTYPE *PFN_SurfDesc)(void *, D3DSURFACE_DESC *);
 static HRESULT STDMETHODCALLTYPE pk_SurfLock(void *s, D3DLOCKED_RECT *lr, const RECT *r, DWORD flags)
 {
     HRESULT hr;
+    D3DSURFACE_DESC d = { 0 };
+    ((PFN_SurfDesc)(*(void ***)s)[12])(s, &d);
+    LONGLONG t0 = qpc();
     TIMED(A_SURF, ((PFN_SurfLock)orig_of(g_hSurf, s))(s, lr, r, flags));
+    site_add(__builtin_return_address(0), &d, flags, r, qpc() - t0);
     return hr;
 }
 
@@ -497,22 +548,22 @@ static HRESULT STDMETHODCALLTYPE pk_EndScene(IDirect3DDevice9 *d)               
 
 typedef HRESULT (STDMETHODCALLTYPE *PFN_DP)(IDirect3DDevice9 *, D3DPRIMITIVETYPE, UINT, UINT);
 static HRESULT STDMETHODCALLTYPE pk_DP(IDirect3DDevice9 *d, D3DPRIMITIVETYPE t, UINT a, UINT b)    /* 81 */
-{ HRESULT hr; TIMED(A_DRAW, ORIG(81, PFN_DP)(d, t, a, b)); return hr; }
+{ HRESULT hr; LONGLONG t0 = qpc(); TIMED(A_DRAW, ORIG(81, PFN_DP)(d, t, a, b)); g_drawKind[0]++; g_drawKindT[0] += qpc() - t0; return hr; }
 
 typedef HRESULT (STDMETHODCALLTYPE *PFN_DIP)(IDirect3DDevice9 *, D3DPRIMITIVETYPE, INT, UINT, UINT, UINT, UINT);
 static HRESULT STDMETHODCALLTYPE pk_DIP(IDirect3DDevice9 *d, D3DPRIMITIVETYPE t, INT a, UINT b, UINT c, UINT e,
                                         UINT f)                                                 /* 82 */
-{ HRESULT hr; TIMED(A_DRAW, ORIG(82, PFN_DIP)(d, t, a, b, c, e, f)); return hr; }
+{ HRESULT hr; LONGLONG t0 = qpc(); TIMED(A_DRAW, ORIG(82, PFN_DIP)(d, t, a, b, c, e, f)); g_drawKind[1]++; g_drawKindT[1] += qpc() - t0; return hr; }
 
 typedef HRESULT (STDMETHODCALLTYPE *PFN_DPUP)(IDirect3DDevice9 *, D3DPRIMITIVETYPE, UINT, const void *, UINT);
 static HRESULT STDMETHODCALLTYPE pk_DPUP(IDirect3DDevice9 *d, D3DPRIMITIVETYPE t, UINT a, const void *p, UINT s)
-{ HRESULT hr; TIMED(A_DRAW, ORIG(83, PFN_DPUP)(d, t, a, p, s)); return hr; }                  /* 83 */
+{ HRESULT hr; LONGLONG t0 = qpc(); TIMED(A_DRAW, ORIG(83, PFN_DPUP)(d, t, a, p, s)); g_drawKind[2]++; g_drawKindT[2] += qpc() - t0; return hr; }                  /* 83 */
 
 typedef HRESULT (STDMETHODCALLTYPE *PFN_DIPUP)(IDirect3DDevice9 *, D3DPRIMITIVETYPE, UINT, UINT, UINT, const void *,
                                                D3DFORMAT, const void *, UINT);
 static HRESULT STDMETHODCALLTYPE pk_DIPUP(IDirect3DDevice9 *d, D3DPRIMITIVETYPE t, UINT a, UINT b, UINT c,
                                           const void *i, D3DFORMAT f, const void *v, UINT s)   /* 84 */
-{ HRESULT hr; TIMED(A_DRAW, ORIG(84, PFN_DIPUP)(d, t, a, b, c, i, f, v, s)); return hr; }
+{ HRESULT hr; LONGLONG t0 = qpc(); TIMED(A_DRAW, ORIG(84, PFN_DIPUP)(d, t, a, b, c, i, f, v, s)); g_drawKind[3]++; g_drawKindT[3] += qpc() - t0; return hr; }
 
 typedef HRESULT (STDMETHODCALLTYPE *PFN_UpdSurf)(IDirect3DDevice9 *, void *, const RECT *, void *, const POINT *);
 static HRESULT STDMETHODCALLTYPE pk_UpdSurf(IDirect3DDevice9 *d, void *a, const RECT *r, void *b, const POINT *p)
@@ -648,7 +699,12 @@ static void prof_frame(LONGLONG now)
     char path[MAX_PATH];
     snprintf(path, sizeof path, "%sprofile.log", g_dir);
     FILE *f = fopen(path, "a");
-    if (f) { fprintf(f, "%s\n", line); fclose(f); }
+    static int secs;
+    if (f) {
+        fprintf(f, "%s\n", line);
+        if (++secs % 10 == 0) sites_dump(f);
+        fclose(f);
+    }
     memset(g_acc, 0, sizeof g_acc);
     memset(g_bufClass, 0, sizeof g_bufClass);
     g_pFrames = g_pSlow = 0;
