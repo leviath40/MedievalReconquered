@@ -91,7 +91,8 @@ def main(folders):
     for s in (4, 2):
         if n[s]:
             subprocess.run([os.path.join(UPSCAYL, 'bin', 'upscayl-bin.exe'), '-i', tmp[s], '-o', OUT,
-                            '-m', os.path.join(UPSCAYL, 'models'), '-n', 'ultrasharp-4x', '-s', str(s), '-f', 'png'],
+                            '-m', os.path.join(UPSCAYL, 'models'), '-n', 'ultrasharp-4x', '-s', str(s), '-f', 'png',
+                            '-j', '1:1:1'],                 # batch mode with parallel threads garbles some outputs
                            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for f in os.listdir(tmp[s]): os.remove(os.path.join(tmp[s], f))
         os.rmdir(tmp[s])

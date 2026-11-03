@@ -9,8 +9,12 @@ runs below the monitor resolution.
 `build_icons.py` decodes every `.BIF` in `campmap` and `frontend_files` (not `campmap\pieces`, drawn in
 3D), upscales each frame with Upscayl's `ultrasharp-4x` (4x, or 2x for sprites of 200 px or more;
 sprites thinner than 16 px are skipped) and writes `hd_icons/<hash>_<frame>.png` in the game folder
-(~2,600 files, ~130 MB, a few minutes). Needs Upscayl (`winget install Upscayl.Upscayl`).
+(~2,600 files, ~540 MB, about 15 minutes). Needs Upscayl (`winget install Upscayl.Upscayl`).
 The files are derived from the game's art: they are git-ignored and never committed.
+
+After building, `python patches\hd_icons\check_icons.py` compares each small HD sprite with its original
+(`--delete` removes bad ones; Upscayl garbled ~1,150 outputs when run with parallel threads, so the script
+now runs it single-threaded).
 
 In game, the proxy hooks the sprite blitter (report §13), and in its upscaling pass draws the HD copy of
 each sprite over it, only on pixels that still show the original sprite, so text, highlights and the

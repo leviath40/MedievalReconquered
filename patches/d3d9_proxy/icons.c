@@ -31,8 +31,13 @@ static int __cdecl hk_blit(BYTE *spr, int x, int y, int frame, int cw, int ch)
 {
     DWORD ret = (DWORD)__builtin_return_address(0) - 5;
     if (g_hdIcons && spr && g_icN < IC_MAX) {
-        IcDraw *d = &g_icDraws[g_icN++];
-        d->spr = spr; d->x = x; d->y = y; d->frame = frame; d->cw = cw; d->ch = ch;
+        UINT w = *(UINT *)(spr + 0x200), h = *(UINT *)(spr + 0x204), n = *(UINT *)(spr + 0x20C) * *(UINT *)(spr + 0x210);
+        if (w && h && w <= 2048 && h <= 2048 && n && n <= 4096) {
+            IcDraw *d = &g_icDraws[g_icN++];
+            d->spr = spr; d->hash = fnv(spr, 0x214, 2166136261u); d->last = 0;
+            d->x = x; d->y = y; d->frame = frame < 0 ? 0 : (int)((UINT)frame % n); d->cw = cw; d->ch = ch;
+            d->w = (int)w; d->h = (int)h;
+        }
     }
     if (g_icLog && spr && g_icLines < 20000) {
         DWORD h = fnv(spr, 0x214, 2166136261u);

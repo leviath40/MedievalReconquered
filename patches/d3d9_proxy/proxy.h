@@ -35,7 +35,8 @@ void plog(const char *fmt, ...);
 int patch_mem(void *dst, const void *src, SIZE_T n);
 int patch_ptr(void **slot, void *val);
 void patch_icons(void);
-typedef struct { BYTE *spr; int x, y, frame, cw, ch; } IcDraw;   /* one sprite blit (icons.c) */
+/* one sprite blit (icons.c): spr is only valid during its frame (the game may free it), hash identifies it */
+typedef struct { BYTE *spr; DWORD hash, last; int x, y, frame, cw, ch, w, h; } IcDraw;
 #define IC_MAX 2048
 extern IcDraw g_icDraws[IC_MAX];
 extern int g_icN;

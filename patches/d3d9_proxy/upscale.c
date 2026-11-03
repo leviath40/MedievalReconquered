@@ -303,17 +303,15 @@ static void hd_flush(void)
     g_hdUsed = 0;
 }
 
-static HdEnt *hd_get(IDirect3DDevice9 *dev, const BYTE *spr, int frame)
+/* cache lookup; with spr (only valid during the blit's own frame) a miss loads the HD copy */
+static HdEnt *hd_get(IDirect3DDevice9 *dev, const BYTE *spr, DWORD hash, int frame)
 {
-    UINT n = *(const UINT *)(spr + 0x20C) * *(const UINT *)(spr + 0x210);
-    if (!n) return NULL;
-    frame = frame < 0 ? 0 : (int)((UINT)frame % n);
-    DWORD hash = fnv(spr, 0x214, 2166136261u);
     UINT i = (hash ^ (DWORD)frame * 2654435761u) % HD_SLOTS;
     while (g_hd[i].state && (g_hd[i].hash != hash || g_hd[i].frame != frame)) i = (i + 1) % HD_SLOTS;
     HdEnt *e = &g_hd[i];
     if (e->state) return e->state > 0 ? e : NULL;
-    if (g_hdUsed >= HD_SLOTS * 3 / 4) { hd_flush(); return hd_get(dev, spr, frame); }
+    if (!spr) return NULL;
+    if (g_hdUsed >= HD_SLOTS * 3 / 4) { hd_flush(); return hd_get(dev, spr, hash, frame); }
     g_hdUsed++;
     e->hash = hash; e->frame = frame; e->state = -1;
     char path[MAX_PATH];
@@ -331,16 +329,62 @@ static HdEnt *hd_get(IDirect3DDevice9 *dev, const BYTE *spr, int frame)
     return e->state > 0 ? e : NULL;
 }
 
+/* Placements kept across frames: the game draws static UI (e.g. the campaign's bottom panel buttons) once and
+ * leaves it in the back buffer, so this frame's blits alone would show HD for one frame only. A placement
+ * stays until the screen size changes, the list is full (oldest go), or its sprite moved: it was drawn last
+ * frame, isn't this frame, but the same sprite is (the cursor). The shader's per-pixel test hides any stale
+ * placement whose area has been drawn over since. */
+#define HD_KEEP 512
+static IcDraw g_keep[HD_KEEP];
+static int g_keepN;
+static DWORD g_hdFrame;
+static UINT g_keepW, g_keepH;
+
+static void hd_merge(IDirect3DDevice9 *dev, const D3DSURFACE_DESC *bd)
+{
+    DWORD now = ++g_hdFrame;
+    if (bd->Width != g_keepW || bd->Height != g_keepH) { g_keepN = 0; g_keepW = bd->Width; g_keepH = bd->Height; }
+    for (int k = 0; k < g_icN; k++) {
+        IcDraw *d = &g_icDraws[k];
+        hd_get(dev, d->spr, d->hash, d->frame);           /* load while the sprite pointer is valid */
+        int i = 0;
+        while (i < g_keepN && !(g_keep[i].hash == d->hash && g_keep[i].x == d->x && g_keep[i].y == d->y &&
+                                g_keep[i].frame == d->frame && g_keep[i].cw == d->cw && g_keep[i].ch == d->ch)) i++;
+        if (i == g_keepN) {
+            if (g_keepN == HD_KEEP) {                     /* full: drop the oldest */
+                int o = 0;
+                for (int j = 1; j < g_keepN; j++) if (g_keep[j].last < g_keep[o].last) o = j;
+                memmove(&g_keep[o], &g_keep[o + 1], (size_t)(g_keepN - o - 1) * sizeof g_keep[0]);
+                g_keepN--;
+                i = g_keepN;
+            }
+            g_keep[g_keepN++] = *d;
+        }
+        g_keep[i].spr = NULL;
+        g_keep[i].last = now;
+    }
+    int n = 0;                                            /* sprites that moved: drop the old placement */
+    for (int i = 0; i < g_keepN; i++) {
+        IcDraw *e = &g_keep[i];
+        int moved = 0;
+        if (e->last == now - 1)
+            for (int j = 0; j < g_keepN && !moved; j++) moved = g_keep[j].last == now && g_keep[j].hash == e->hash;
+        if (!moved) g_keep[n++] = *e;
+    }
+    g_keepN = n;
+}
+
 /* third pass, inside the upscaler's scene, after the logo */
 static void hd_draw(IDirect3DDevice9 *dev, const D3DSURFACE_DESC *bd, int dw, int dh)
 {
-    if (!g_hdIcons || !g_usPs[0] || !g_icN) return;
+    if (!g_hdIcons || !g_usPs[0]) return;
+    hd_merge(dev, bd);
     int ready = 0;
     float fw = (float)bd->Width, fh = (float)bd->Height, hx = 1.0f / dw, hy = 1.0f / dh;
     static const float noTone[4] = { 0, 0, 0, 0 };
-    for (int k = 0; k < g_icN; k++) {
-        const IcDraw *d = &g_icDraws[k];
-        HdEnt *e = hd_get(dev, d->spr, d->frame);
+    for (int k = 0; k < g_keepN; k++) {
+        const IcDraw *d = &g_keep[k];
+        HdEnt *e = hd_get(dev, NULL, d->hash, d->frame);
         if (!e) continue;
         if (!ready) {
             ready = 1;
@@ -363,7 +407,7 @@ static void hd_draw(IDirect3DDevice9 *dev, const D3DSURFACE_DESC *bd, int dw, in
             IDirect3DDevice9_SetRenderState(dev, D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
             IDirect3DDevice9_SetRenderState(dev, D3DRS_BLENDOP, D3DBLENDOP_ADD);
         }
-        int w = (int)*(const UINT *)(d->spr + 0x200), h = (int)*(const UINT *)(d->spr + 0x204);
+        int w = d->w, h = d->h;
         int cw = d->cw < 0 || d->cw > w ? w : d->cw, ch = d->ch < 0 || d->ch > h ? h : d->ch;
         float rect[4] = { (float)d->x, (float)d->y, (float)w, (float)h };
         float x0 = d->x / fw * 2 - 1, x1 = (d->x + cw) / fw * 2 - 1;
