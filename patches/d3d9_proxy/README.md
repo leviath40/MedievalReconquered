@@ -37,6 +37,7 @@ FPSLimit=0     ; frame rate cap, e.g. 60 (0 = off; both display modes)
 BatchUI=1      ; 1 = battle UI panels: one back-buffer lock per panel group (report §11)
 Upscale=2      ; borderless: upscale low-res screens (the 800x600 menus) with a shader: 0 = plain stretch, 1 = sharp, 2 = smooth (default)
 MenuSides=1    ; with Upscale: fill the bars beside the 4:3 menus with the game's wood texture (textures/campmap/Wood2.tga), 0 = black
+IconLog=0      ; debug: 1 = log the sprites the game draws (file hash, position) to icons.log
 DumpFrame=0    ; debug: 1 = save one raw back buffer to frame.raw
 FastDraw=1     ; 1 = DrawIndexedPrimitiveUP replayed through dynamic buffers (report §11)
 Profile=1      ; 1 = write profile.log (frame-time breakdown; on by default, restarts past 4 MB)

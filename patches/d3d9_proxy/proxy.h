@@ -21,7 +21,7 @@ typedef BOOL (WINAPI *PFN_SetCursorPos)(int, int);
 typedef BOOL (WINAPI *PFN_ClipCursor)(const RECT *);
 
 /* config (MedievalReconquered.ini [Display]) */
-extern int g_borderless, g_keepAspect, g_log, g_showFps, g_fpsLimit, g_profile, g_batchUI, g_fastDraw, g_upscale, g_dumpFrame, g_menuSides;
+extern int g_borderless, g_keepAspect, g_log, g_showFps, g_fpsLimit, g_profile, g_batchUI, g_fastDraw, g_upscale, g_dumpFrame, g_menuSides, g_iconLog;
 extern int g_campW, g_campH, g_batW, g_batH;
 
 /* window and image geometry (proxy.c) */
@@ -34,6 +34,7 @@ extern UINT g_presentInterval;
 void plog(const char *fmt, ...);
 int patch_mem(void *dst, const void *src, SIZE_T n);
 int patch_ptr(void **slot, void *val);
+void patch_icon_log(void);
 
 /* fps.c */
 void draw_fps(IDirect3DDevice9 *dev);

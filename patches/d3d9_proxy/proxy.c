@@ -9,6 +9,7 @@
  *   fastdraw.c      DrawIndexedPrimitiveUP through our own dynamic buffers (FastDraw)
  *   upscale.c       shader upscaling of low-res screens + full-resolution menu logo (Upscale)
  *   game_patches.c  in-memory game code patches: Video menu switch, resolution override, BatchUI
+ *   icons.c         sprite blitter hook: IconLog (debug) now, HD sprites next
  *   proxy.h         shared declarations
  *
  * The exe imports D3D9.dll!Direct3DCreate9, so this DLL (in the game folder) is loaded
@@ -43,6 +44,7 @@
  *   Profile=1        ; 1 = write profile.log: per-second breakdown of frame time (on by default,
  *                    ;     new file past 4 MB; 0 = off)
  *   MenuSides=1      ; with Upscale: fill the bars beside 4:3 screens with the game's wood texture (0 = black)
+ *   IconLog=0        ; debug: 1 = log sprite draws to icons.log (icons.c)
  *   DumpFrame=0      ; debug: 1 = save one raw back buffer to frame.raw
  *   Log=0            ; 1 = write borderless.log
  */
@@ -57,7 +59,7 @@ static PFN_GetCursorPos g_realGetCursorPos;
 static PFN_SetCursorPos g_realSetCursorPos;
 static PFN_ClipCursor g_realClipCursor;
 
-int g_borderless = 1, g_keepAspect = 1, g_log = 0, g_showFps = 0, g_fpsLimit = 0, g_profile = 1, g_batchUI = 1, g_fastDraw = 1, g_upscale = 2, g_dumpFrame = 0, g_menuSides = 1;
+int g_borderless = 1, g_keepAspect = 1, g_log = 0, g_showFps = 0, g_fpsLimit = 0, g_profile = 1, g_batchUI = 1, g_fastDraw = 1, g_upscale = 2, g_dumpFrame = 0, g_menuSides = 1, g_iconLog = 0;
 int g_campW, g_campH, g_batW, g_batH;   /* resolution overrides from the ini, 0 = off */
 HWND g_hwnd;
 static WNDPROC g_origWndProc;
@@ -100,6 +102,7 @@ static void load_config(void)
     g_upscale = GetPrivateProfileIntA("Display", "Upscale", 2, ini);
     g_dumpFrame = GetPrivateProfileIntA("Display", "DumpFrame", 0, ini);
     g_menuSides = GetPrivateProfileIntA("Display", "MenuSides", 1, ini);
+    g_iconLog = GetPrivateProfileIntA("Display", "IconLog", 0, ini);
     if (g_upscale < 0 || g_upscale > 2) g_upscale = 2;
     if (g_fpsLimit < 0 || g_fpsLimit > 1000) g_fpsLimit = 0;
     g_campW = GetPrivateProfileIntA("Display", "CampaignWidth", 0, ini);
@@ -414,6 +417,7 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID r)
         patch_video_menu();
         patch_resolution();
         if (g_batchUI) patch_ui_batch();
+        if (g_iconLog) patch_icon_log();
     }
     return TRUE;
 }

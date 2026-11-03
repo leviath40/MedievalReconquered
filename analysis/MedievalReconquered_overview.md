@@ -469,3 +469,12 @@ Measured with the proxy's profiler (`Profile=1`, on by default → `profile.log`
   - load failure (0x40D4C4): flag cleared and the low-detail texture used instead.
   So on any modern PC `MapTex2.tga` is used. Whether the engine would take a texture larger than 4096×3072 is untested.
 - `patches/campmap/build_map.py` rebuilds `MapTex2.tga` from our own painting via Upscayl.
+
+## 13. HD icons, stage 1: how sprites are drawn (2026-11-03)
+
+- **One blitter for nearly all 2D sprites**: `0x73D47E`, cdecl `blit(sprite, x, y, frame, clipW, clipH)` (clip = -1 for none, caller pops 0x18), 16-bit RLE into the locked back buffer (`[0x8D0248]`, pitch `[0x8D0244]`). Its entry is a Proteus hook site (`jmp 0xF43389`), so it is observed by redirecting its **281** `call` sites instead (`IconLog=1`, `patches/d3d9_proxy/icons.c`). Text is **not** drawn through it.
+- The sprite struct is the loaded BIF itself: palette (0x200), then +0x200 width, +0x204 height, +0x20C × +0x210 frames. For `.BIF` files the first 0x214 bytes equal the file's, so an FNV-1a hash of them identifies the file (checked: cursor, logo, menu parchment). `.tga` sprites (e.g. 96×142 character portraits, 24-bit TGAs) are converted at load (`FUN_00402240`, thiscall, arg 1 = file name, 34 call sites) and do not match; some 50×50 unit cards don't match either (palette changed at load, probably faction colours **[inferred]**). Naming those needs a loader hook.
+- Logged in a campaign session (106 distinct sprites): campaign buttons, building cards (`review_panel/Buildings`, 68×50), unit/agent cards (`review_panel`, 50×50), info pictures (`Info_Pics`, 366×448), shields, parchment icons and panels, portraits, minimap, cursor, plus the front-end menus. Positions are back-buffer pixels (800×600 menus, 1280×720 campaign).
+- **Not** through this blitter: campaign map pieces (armies, agents, castles: 3D) and the battle UI unit cards (only battle cursors were logged). Battles render at native resolution, so they don't need HD sprites; their small UI is a separate problem.
+- Plan for HD sprites: Upscayl 4× copies of the sprite files (generated locally, not committed); the proxy records each frame's blits (sprite, rect) and, in the upscaling pass, draws the HD version over each rect, only on pixels that still show the low-res sprite (the HD-logo technique of §9), so text, highlights and the cursor drawn on top are kept. Tinted sprites (changed palette) need the tint applied to the HD copy or are skipped.
+
