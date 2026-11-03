@@ -458,3 +458,13 @@ Measured with the proxy's profiler (`Profile=1`, on by default → `profile.log`
 - **Battle UI panels** (`bmdialogbase.cpp`, `FUN_004c4270`): 3D background (vtable +0x18), then lock + 2D (vtable +0x10 test, +0x14 draw, tail at 0x4C4347). The panel-group draw method `0x4CEAC0` (pass 4) loops over them. `BatchUI=1` (proxy, in memory): the tail queues the 2D part while a group is drawn and the group method (replaced) draws all of them under one lock at the end, in order. About 13 locks/frame → 1.
 - **Remaining 5 locks** come from different HUD parts (battle HUD `FUN_004b7f50` / `battleplayer.cpp`, `FUN_00411e20` from 0x4BFBB8, the group flush, …) with 3D in between; wrapping `FUN_004b7f50` and gating the lock was tried and gained nothing (reverted). Removing them would need all 2D redirected to an overlay composited at frame end.
 - **DrawIndexedPrimitiveUP** (Proteus, ~230/frame, ~70 vertices each) cost ~25 µs per call on the driver vs ~1.5 µs for DrawPrimitiveUP. `FastDraw=1` copies vertices/indices into our dynamic VB/IB ring buffers (NOOVERWRITE, DISCARD on wrap; released before Reset) and calls DrawIndexedPrimitive, then sets stream 0 / indices to NULL as DIPUP does. ~2 µs per call. No rendering differences seen.
+
+## 12. Campaign map texture (2026-11-03)
+
+- The campaign map painting is `textures/campmap/MapTex2.tga` (4096×3072) or `MapTex.tga` (2048×1536): plain 24-bit uncompressed TGAs, bottom-up. Viking Invasion has its own pair in `textures/campmap/Vikings/`. `campmap/EPIC.BIF` is not the map: it is 160 frames of 320×240 event pictures. Province/land lookups are separate (`LukMap*.Lbm`, `LUKUPMAP*.LBM`; strings `textures\campmap\lukupmap` at 0x7BC010, `lukupmap` at 0x7EAC80).
+- Choice of texture (`main3d_1.cpp`, path built from `textures\campmap\maptex` at 0x79D53C, a `"2"` suffix at 0x79D374 when flag **0x8D6718** is set, then `.tga`): **[confirmed by disassembly]**
+  - startup (0x5FC385–0x5FC3A7): flag = 0, then 1 if the device reports a max texture size ≥ 512 in both dimensions (any GPU since the early 2000s);
+  - map load (0x40CE46–0x40CE83): flag cleared if `GlobalMemoryStatus` reports < 160 MB physical RAM (0x0A000000), or if a second memory comparison fails (`[ebp-8]` vs `[ebp-0x24]` × 4980736.0, not decoded), unless `[0x8D6724] == 1`;
+  - load failure (0x40D4C4): flag cleared and the low-detail texture used instead.
+  So on any modern PC `MapTex2.tga` is used. Whether the engine would take a texture larger than 4096×3072 is untested.
+- `patches/campmap/build_map.py` rebuilds `MapTex2.tga` from our own painting via Upscayl.
