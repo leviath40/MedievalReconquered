@@ -7,8 +7,10 @@
  *   fps.c           FPS counter (ShowFPS) and frame rate cap (FPSLimit)
  *   profile.c       frame-time profiler (Profile) -> profile.log
  *   fastdraw.c      DrawIndexedPrimitiveUP through our own dynamic buffers (FastDraw)
- *   upscale.c       shader upscaling of low-res screens + full-resolution menu logo (Upscale)
+ *   upscale.c       shader upscaling of low-res screens, full-resolution menu logo, wood side bars,
+ *                   HD sprites (Upscale, MenuSides, HDIcons)
  *   game_patches.c  in-memory game code patches: Video menu switch, resolution override, BatchUI
+ *   icons.c         sprite blitter hook: per-frame blit list for HDIcons, IconLog (debug)
  *   proxy.h         shared declarations
  *
  * The exe imports D3D9.dll!Direct3DCreate9, so this DLL (in the game folder) is loaded
@@ -43,6 +45,8 @@
  *   Profile=1        ; 1 = write profile.log: per-second breakdown of frame time (on by default,
  *                    ;     new file past 4 MB; 0 = off)
  *   MenuSides=1      ; with Upscale: fill the bars beside 4:3 screens with the game's wood texture (0 = black)
+ *   IconLog=0        ; debug: 1 = log sprite draws to icons.log (icons.c)
+ *   HDIcons=0        ; with Upscale: draw HD copies of sprites from hd_icons/ (patches/hd_icons)
  *   DumpFrame=0      ; debug: 1 = save one raw back buffer to frame.raw
  *   Log=0            ; 1 = write borderless.log
  */
@@ -57,7 +61,7 @@ static PFN_GetCursorPos g_realGetCursorPos;
 static PFN_SetCursorPos g_realSetCursorPos;
 static PFN_ClipCursor g_realClipCursor;
 
-int g_borderless = 1, g_keepAspect = 1, g_log = 0, g_showFps = 0, g_fpsLimit = 0, g_profile = 1, g_batchUI = 1, g_fastDraw = 1, g_upscale = 2, g_dumpFrame = 0, g_menuSides = 1;
+int g_borderless = 1, g_keepAspect = 1, g_log = 0, g_showFps = 0, g_fpsLimit = 0, g_profile = 1, g_batchUI = 1, g_fastDraw = 1, g_upscale = 2, g_dumpFrame = 0, g_menuSides = 1, g_iconLog = 0, g_hdIcons = 0;
 int g_campW, g_campH, g_batW, g_batH;   /* resolution overrides from the ini, 0 = off */
 HWND g_hwnd;
 static WNDPROC g_origWndProc;
@@ -100,6 +104,8 @@ static void load_config(void)
     g_upscale = GetPrivateProfileIntA("Display", "Upscale", 2, ini);
     g_dumpFrame = GetPrivateProfileIntA("Display", "DumpFrame", 0, ini);
     g_menuSides = GetPrivateProfileIntA("Display", "MenuSides", 1, ini);
+    g_iconLog = GetPrivateProfileIntA("Display", "IconLog", 0, ini);
+    g_hdIcons = GetPrivateProfileIntA("Display", "HDIcons", 0, ini);
     if (g_upscale < 0 || g_upscale > 2) g_upscale = 2;
     if (g_fpsLimit < 0 || g_fpsLimit > 1000) g_fpsLimit = 0;
     g_campW = GetPrivateProfileIntA("Display", "CampaignWidth", 0, ini);
@@ -309,8 +315,10 @@ static HRESULT STDMETHODCALLTYPE hk_Reset(IDirect3DDevice9 *dev, D3DPRESENT_PARA
 
 static HRESULT present_frame(IDirect3DDevice9 *dev, const RECT *src, const RECT *dst, HWND wnd, const RGNDATA *dirty)
 {
-    if (g_borderless && g_upscale && !src && !wnd && us_present(dev)) return D3D_OK;
-    return g_origPresent(dev, src, dst, wnd, dirty);
+    HRESULT hr = D3D_OK;
+    if (!(g_borderless && g_upscale && !src && !wnd && us_present(dev))) hr = g_origPresent(dev, src, dst, wnd, dirty);
+    g_icN = 0;                                        /* next frame's sprite blits */
+    return hr;
 }
 
 static HRESULT STDMETHODCALLTYPE hk_Present(IDirect3DDevice9 *dev, const RECT *src, const RECT *dst,
@@ -414,6 +422,7 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID r)
         patch_video_menu();
         patch_resolution();
         if (g_batchUI) patch_ui_batch();
+        if (g_iconLog || g_hdIcons) patch_icons();
     }
     return TRUE;
 }

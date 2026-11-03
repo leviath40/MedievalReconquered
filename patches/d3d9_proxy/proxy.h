@@ -21,7 +21,7 @@ typedef BOOL (WINAPI *PFN_SetCursorPos)(int, int);
 typedef BOOL (WINAPI *PFN_ClipCursor)(const RECT *);
 
 /* config (MedievalReconquered.ini [Display]) */
-extern int g_borderless, g_keepAspect, g_log, g_showFps, g_fpsLimit, g_profile, g_batchUI, g_fastDraw, g_upscale, g_dumpFrame, g_menuSides;
+extern int g_borderless, g_keepAspect, g_log, g_showFps, g_fpsLimit, g_profile, g_batchUI, g_fastDraw, g_upscale, g_dumpFrame, g_menuSides, g_iconLog, g_hdIcons;
 extern int g_campW, g_campH, g_batW, g_batH;
 
 /* window and image geometry (proxy.c) */
@@ -34,6 +34,13 @@ extern UINT g_presentInterval;
 void plog(const char *fmt, ...);
 int patch_mem(void *dst, const void *src, SIZE_T n);
 int patch_ptr(void **slot, void *val);
+void patch_icons(void);
+/* one sprite blit (icons.c): spr is only valid during its frame (the game may free it), hash identifies it */
+typedef struct { BYTE *spr; DWORD hash, last; int x, y, frame, cw, ch, w, h; } IcDraw;
+#define IC_MAX 2048
+extern IcDraw g_icDraws[IC_MAX];
+extern int g_icN;
+DWORD fnv(const BYTE *p, int n, DWORD h);
 
 /* fps.c */
 void draw_fps(IDirect3DDevice9 *dev);

@@ -67,7 +67,7 @@ def main():
     OUT.parent.mkdir(exist_ok=True)
     cmd = [find_zig(), "cc", "-target", "x86-windows-gnu", "-shared", "-O2", "-s",
            "-o", str(OUT), *(str(c) for c in sorted(HERE.glob("*.c"))), str(HERE / "d3d9.def"),
-           "-luser32", "-lgdi32", "-lwinmm"]
+           "-luser32", "-lgdi32", "-lwinmm", "-lole32"]
     subprocess.run(cmd, check=True)
     shutil.copy2(OUT, target)
     print(f"installed {target}")
