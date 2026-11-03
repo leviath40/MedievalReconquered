@@ -27,6 +27,7 @@ patch scripts and sources; they are applied to your own install.
 - **New logo** on the main menu (drawn at full screen resolution with menu upscaling) and the loading screen; main-menu parchment without the scroll
   banner (`patches/logo/`).
 - **New icon** for the game and the launcher (`patches/icon/`).
+- **New campaign map** painting, AI-upscaled to the game's 4096x3072 (`patches/campmap/`).
 - **Boot intro skipped** (the game's own `skipcredits.txt` switch).
 
 ### Tools and research
