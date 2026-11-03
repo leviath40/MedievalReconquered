@@ -9,7 +9,8 @@ patch scripts and sources; they are applied to your own install.
 - **Borderless fullscreen** (`patches/d3d9_proxy/`, a `d3d9.dll` proxy): instant alt-tab, aspect
   ratio kept, mouse mapped correctly; on/off switch added to the game's Video options menu.
 - **Launcher** (`patches/launcher/`): campaign map and battle resolution (any monitor mode),
-  display mode, FPS counter, 60 FPS cap.
+  display mode, FPS counter, 60 FPS cap. (Fixed: campaign and battle resolutions were applied
+  the wrong way round.)
 - **Sharper menus**: the 800x600 menus are upscaled with a smooth GPU shader instead of a plain
   stretch (borderless mode).
 - **No more black bars beside the menus**: the sides of the 4:3 menus are filled with the game's

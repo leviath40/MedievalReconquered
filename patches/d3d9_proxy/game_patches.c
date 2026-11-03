@@ -84,16 +84,17 @@ void patch_video_menu(void)
 
 /* ------------------------------------------------------------------ resolution override */
 /*
- * Medieval.Cfg stores the campaign and battle resolutions as indices (0xE77B08 / 0xE77B04) into
+ * Medieval.Cfg stores the campaign and battle resolutions as indices (0xE77B04 / 0xE77B08) into
  * per-device mode lists the game builds at startup. At 0x6DE4BE (mov edx,[0xE77B04]) the lists
  * exist and the game is about to clamp the indices and turn them into width/height
- * (0x7A2780 campaign, 0x7A2788 battle). The hook writes the indices of the ini resolutions first.
+ * (0x7A2788 campaign, 0x7A2780 battle; confirmed in play 2026-11-03). The hook writes the indices of
+ * the ini resolutions first.
  * Device records: 0xE7A1E0 + 0x60 * [0x895F8C]; +0x34 mode records (32 bytes: +4 width,
- * +8 height); +0x20/+0x44 campaign count/index array; +0x24/+0x54 battle count/index array.
+ * +8 height); +0x24/+0x54 campaign count/index array; +0x20/+0x44 battle count/index array.
  */
 #define RES_HOOK   0x6DE4BEu
-#define CFG_BATTLE 0xE77B04u
-#define CFG_CAMP   0xE77B08u
+#define CFG_CAMP   0xE77B04u
+#define CFG_BATTLE 0xE77B08u
 #define DEV_INDEX  0x895F8Cu
 #define DEV_TABLE  0xE7A1E0u
 
@@ -119,8 +120,8 @@ __attribute__((used)) void __cdecl apply_resolution(void)
     int d = *(int *)DEV_INDEX;
     if (d < 0) return;
     BYTE *dev = (BYTE *)DEV_TABLE + d * 0x60;
-    int camp = find_mode(dev, 0x20, 0x44, g_campW, g_campH);
-    int battle = find_mode(dev, 0x24, 0x54, g_batW, g_batH);
+    int camp = find_mode(dev, 0x24, 0x54, g_campW, g_campH);
+    int battle = find_mode(dev, 0x20, 0x44, g_batW, g_batH);
     if (camp >= 0) *(int *)CFG_CAMP = camp;
     if (battle >= 0) *(int *)CFG_BATTLE = battle;
     plog("resolution: campaign %dx%d -> index %d, battle %dx%d -> index %d (-1 = game setting kept)",
