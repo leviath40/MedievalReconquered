@@ -70,7 +70,7 @@ static const char g_usPsLogo[] =
     "sampler2D hd : register(s2);     /* high-res logo, premultiplied, trilinear */\n"
     "float4 c0 : register(c0);        /* frame w, h, 1/w, 1/h */\n"
     "float4 c2 : register(c2);        /* sprite x, y, w, h in the frame */\n"
-    "float4 c3 : register(c3);        /* parchment tone behind the logo */\n"
+    "float4 c3 : register(c3);        /* logo: parchment tone behind it, a = 1; HD sprites: 0 (blend over) */\n"
     "float4 main(float2 uv : TEXCOORD0) : COLOR {\n"
     "    float2 ti = floor(uv * c2.zw);\n"
     "    float opaque = 0, matched = 0;\n"
@@ -85,7 +85,7 @@ static const char g_usPsLogo[] =
     "    if (opaque < 0.5 || matched < opaque) return float4(0, 0, 0, 0);  /* not the logo here: keep */\n"
     "    float4 h = tex2D(hd, uv);\n"
     "    float centre = tex2Dlod(spr, float4((ti + 0.5) / c2.zw, 0, 0)).a;\n"
-    "    if (centre > 0.5) return float4(h.rgb + c3.rgb * (1 - h.a), 1);   /* replace the low-res logo pixel */\n"
+    "    if (centre > 0.5 && c3.a > 0.5) return float4(h.rgb + c3.rgb * (1 - h.a), 1);  /* logo: opaque on its tone */\n"
     "    return h;                                                          /* over the parchment */\n"
     "}\n";
 
@@ -131,6 +131,7 @@ static int lg_load(IDirect3DDevice9 *dev)
             g_lgTone[0] = ((hdr[8] >> 16) & 255) / 255.0f;
             g_lgTone[1] = ((hdr[8] >> 8) & 255) / 255.0f;
             g_lgTone[2] = (hdr[8] & 255) / 255.0f;
+            g_lgTone[3] = 1.0f;
             if (g_lgSpr && g_lgHd) g_lgState = 1;
         }
     }
@@ -176,6 +177,211 @@ static void lg_draw(IDirect3DDevice9 *dev, const D3DSURFACE_DESC *bd, int dw, in
     IDirect3DDevice9_DrawPrimitiveUP(dev, D3DPT_TRIANGLESTRIP, 2, q, sizeof q[0]);
     IDirect3DDevice9_SetTexture(dev, 1, NULL);
     IDirect3DDevice9_SetTexture(dev, 2, NULL);
+}
+
+/* ------------------------------------------------------------------ HD sprites (HDIcons=1)
+ * Every sprite blit of the frame is recorded by icons.c. For each one with an HD copy
+ * (hd_icons/<hash>_<frame>.png, patches/hd_icons/build_icons.py; <hash> = FNV-1a of the sprite's first
+ * 0x214 bytes) the HD image is drawn over the blit's rectangle with the logo shader: only where the frame
+ * still shows the low-res sprite, so whatever the game drew on top (text, highlights, cursor) is kept.
+ * PNGs are decoded with WIC on first use; textures are cached (managed pool), missing files remembered.
+ */
+#include <wincodec.h>
+static const GUID kClsidWic = { 0xcacaf262, 0x9370, 0x4615, { 0xa1, 0x3b, 0x9f, 0x55, 0x39, 0xda, 0x4c, 0x0a } };
+static const GUID kIidWicFactory = { 0xec5ec8a9, 0xc395, 0x4314, { 0x9c, 0x77, 0x54, 0xd7, 0xa9, 0x35, 0xff, 0x70 } };
+static const GUID kFmtPbgra = { 0x6fddc324, 0x4e03, 0x4bfe, { 0xb1, 0x85, 0x3d, 0x77, 0x76, 0x8d, 0xc9, 0x10 } };
+static IWICImagingFactory *g_wic;
+
+/* premultiplied BGRA pixels of a PNG, or NULL */
+static BYTE *hd_png(const char *path, UINT *w, UINT *h)
+{
+    if (!g_wic) {
+        CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);          /* fine if COM is already set up */
+        if (FAILED(CoCreateInstance(&kClsidWic, NULL, CLSCTX_INPROC_SERVER, &kIidWicFactory, (void **)&g_wic))) {
+            g_wic = NULL;
+            return NULL;
+        }
+    }
+    WCHAR wpath[MAX_PATH];
+    MultiByteToWideChar(CP_ACP, 0, path, -1, wpath, MAX_PATH);
+    IWICBitmapDecoder *dec = NULL;
+    IWICBitmapFrameDecode *frm = NULL;
+    IWICFormatConverter *conv = NULL;
+    BYTE *px = NULL;
+    if (SUCCEEDED(IWICImagingFactory_CreateDecoderFromFilename(g_wic, wpath, NULL, GENERIC_READ,
+                                                               WICDecodeMetadataCacheOnDemand, &dec)) &&
+        SUCCEEDED(IWICBitmapDecoder_GetFrame(dec, 0, &frm)) &&
+        SUCCEEDED(IWICImagingFactory_CreateFormatConverter(g_wic, &conv)) &&
+        SUCCEEDED(IWICFormatConverter_Initialize(conv, (IWICBitmapSource *)frm, &kFmtPbgra, WICBitmapDitherTypeNone,
+                                                 NULL, 0.0, WICBitmapPaletteTypeCustom)) &&
+        SUCCEEDED(IWICFormatConverter_GetSize(conv, w, h)) && *w && *h && *w <= 8192 && *h <= 8192) {
+        px = malloc((size_t)*w * *h * 4);
+        if (px && FAILED(IWICFormatConverter_CopyPixels(conv, NULL, *w * 4, *w * *h * 4, px))) { free(px); px = NULL; }
+    }
+    if (conv) IWICFormatConverter_Release(conv);
+    if (frm) IWICBitmapFrameDecode_Release(frm);
+    if (dec) IWICBitmapDecoder_Release(dec);
+    return px;
+}
+
+/* the low-res frame as the game draws it: RGB565 expanded by bit replication, A = 0 where transparent */
+static IDirect3DTexture9 *hd_lowres(IDirect3DDevice9 *dev, const BYTE *spr, int frame)
+{
+    UINT w = *(const UINT *)(spr + 0x200), h = *(const UINT *)(spr + 0x204);
+    UINT n = *(const UINT *)(spr + 0x20C) * *(const UINT *)(spr + 0x210);
+    if (!w || !h || w > 2048 || h > 2048 || !n || n > 4096) return NULL;
+    const WORD *pal = (const WORD *)spr;
+    const BYTE *row = spr + 0x214 + *(const UINT *)(spr + 0x214 + frame * 4);
+    BYTE *buf = calloc((size_t)w * h, 4);
+    if (!buf) return NULL;
+    for (UINT y = 0; y < h; y++) {
+        const BYTE *q = row + 2;
+        UINT x = 0;
+        while (x < w) {
+            BYTE c = q[0];
+            UINT cnt = c == 0 ? q[1] : c < 0x80 ? c + 1u : 256u - c;
+            if (!cnt) break;                                     /* malformed row: stop, don't loop */
+            for (UINT i = 0; i < cnt && x < w; i++, x++) {
+                if (c == 0) continue;
+                WORD col = pal[c < 0x80 ? q[1] : q[1 + i]];
+                if (col == 0xF81F) continue;
+                BYTE *d = buf + ((size_t)y * w + x) * 4;
+                UINT r = col >> 11 & 31, g = col >> 5 & 63, b = col & 31;
+                d[0] = (BYTE)(b << 3 | b >> 2); d[1] = (BYTE)(g << 2 | g >> 4); d[2] = (BYTE)(r << 3 | r >> 2); d[3] = 255;
+            }
+            q += c < 0x80 ? 2 : 1 + cnt;
+        }
+        row += *(const WORD *)row;
+    }
+    IDirect3DTexture9 *t = lg_texture(dev, w, h, buf, 0);
+    free(buf);
+    return t;
+}
+
+/* No HD copy: save the sprite as it is in memory (BIF layout) to hd_icons/_pending/<hash>.bif, once, for
+ * build_icons.py to upscale. That covers sprites made at runtime (portraits converted from .tga, recoloured
+ * cards), whose hash no file on disk has. */
+static void hd_pending(const BYTE *spr, DWORD hash)
+{
+    UINT w = *(const UINT *)(spr + 0x200), h = *(const UINT *)(spr + 0x204);
+    UINT n = *(const UINT *)(spr + 0x20C) * *(const UINT *)(spr + 0x210);
+    if (!w || !h || w > 2048 || h > 2048 || !n || n > 256) return;
+    char path[MAX_PATH];
+    snprintf(path, sizeof path, "%shd_icons\\_pending\\%08lx.bif", g_dir, (unsigned long)hash);
+    if (GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) return;
+    size_t end = 0x214 + n * 4;
+    for (UINT f = 0; f < n; f++) {                     /* the data ends after the last row of the last frame */
+        size_t p = 0x214 + *(const UINT *)(spr + 0x214 + f * 4);
+        for (UINT y = 0; y < h; y++) p += *(const WORD *)(spr + p);
+        if (p > end) end = p;
+    }
+    if (end > (8u << 20)) return;
+    snprintf(path, sizeof path, "%shd_icons", g_dir);
+    CreateDirectoryA(path, NULL);
+    snprintf(path, sizeof path, "%shd_icons\\_pending", g_dir);
+    CreateDirectoryA(path, NULL);
+    snprintf(path, sizeof path, "%shd_icons\\_pending\\%08lx.bif", g_dir, (unsigned long)hash);
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    fwrite(spr, 1, end, f);
+    fclose(f);
+    plog("hd: saved %s (%ux%u, %u frames) for build_icons.py", path, w, h, n);
+}
+
+typedef struct { DWORD hash; int frame, state; IDirect3DTexture9 *lo, *hd; } HdEnt;   /* state 1 ok, -1 none */
+#define HD_SLOTS 1024
+static HdEnt g_hd[HD_SLOTS];
+static int g_hdUsed;
+
+static void hd_flush(void)
+{
+    for (int i = 0; i < HD_SLOTS; i++) {
+        if (g_hd[i].lo) IDirect3DTexture9_Release(g_hd[i].lo);
+        if (g_hd[i].hd) IDirect3DTexture9_Release(g_hd[i].hd);
+    }
+    memset(g_hd, 0, sizeof g_hd);
+    g_hdUsed = 0;
+}
+
+static HdEnt *hd_get(IDirect3DDevice9 *dev, const BYTE *spr, int frame)
+{
+    UINT n = *(const UINT *)(spr + 0x20C) * *(const UINT *)(spr + 0x210);
+    if (!n) return NULL;
+    frame = frame < 0 ? 0 : (int)((UINT)frame % n);
+    DWORD hash = fnv(spr, 0x214, 2166136261u);
+    UINT i = (hash ^ (DWORD)frame * 2654435761u) % HD_SLOTS;
+    while (g_hd[i].state && (g_hd[i].hash != hash || g_hd[i].frame != frame)) i = (i + 1) % HD_SLOTS;
+    HdEnt *e = &g_hd[i];
+    if (e->state) return e->state > 0 ? e : NULL;
+    if (g_hdUsed >= HD_SLOTS * 3 / 4) { hd_flush(); return hd_get(dev, spr, frame); }
+    g_hdUsed++;
+    e->hash = hash; e->frame = frame; e->state = -1;
+    char path[MAX_PATH];
+    snprintf(path, sizeof path, "%shd_icons\\%08lx_%d.png", g_dir, (unsigned long)hash, frame);
+    if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES) { hd_pending(spr, hash); return NULL; }
+    UINT w, h;
+    BYTE *px = hd_png(path, &w, &h);
+    if (px) {
+        e->hd = lg_texture(dev, w, h, px, 1);
+        e->lo = hd_lowres(dev, spr, frame);
+        free(px);
+    }
+    if (e->hd && e->lo) e->state = 1;
+    plog("hd: %s %s", path, e->state > 0 ? "loaded" : "unusable");
+    return e->state > 0 ? e : NULL;
+}
+
+/* third pass, inside the upscaler's scene, after the logo */
+static void hd_draw(IDirect3DDevice9 *dev, const D3DSURFACE_DESC *bd, int dw, int dh)
+{
+    if (!g_hdIcons || !g_usPs[0] || !g_icN) return;
+    int ready = 0;
+    float fw = (float)bd->Width, fh = (float)bd->Height, hx = 1.0f / dw, hy = 1.0f / dh;
+    static const float noTone[4] = { 0, 0, 0, 0 };
+    for (int k = 0; k < g_icN; k++) {
+        const IcDraw *d = &g_icDraws[k];
+        HdEnt *e = hd_get(dev, d->spr, d->frame);
+        if (!e) continue;
+        if (!ready) {
+            ready = 1;
+            IDirect3DDevice9_SetPixelShader(dev, g_usPs[0]);
+            IDirect3DDevice9_SetPixelShaderConstantF(dev, 3, noTone, 1);
+            IDirect3DDevice9_SetSamplerState(dev, 0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+            IDirect3DDevice9_SetSamplerState(dev, 0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+            for (int s = 1; s < 3; s++) {
+                DWORD filt = s == 1 ? D3DTEXF_POINT : D3DTEXF_LINEAR;
+                IDirect3DDevice9_SetSamplerState(dev, s, D3DSAMP_MINFILTER, filt);
+                IDirect3DDevice9_SetSamplerState(dev, s, D3DSAMP_MAGFILTER, filt);
+                IDirect3DDevice9_SetSamplerState(dev, s, D3DSAMP_MIPFILTER, s == 2 ? D3DTEXF_LINEAR : D3DTEXF_NONE);
+                IDirect3DDevice9_SetSamplerState(dev, s, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+                IDirect3DDevice9_SetSamplerState(dev, s, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+                IDirect3DDevice9_SetSamplerState(dev, s, D3DSAMP_SRGBTEXTURE, FALSE);
+                IDirect3DDevice9_SetSamplerState(dev, s, D3DSAMP_MAXMIPLEVEL, 0);
+            }
+            IDirect3DDevice9_SetRenderState(dev, D3DRS_ALPHABLENDENABLE, TRUE);
+            IDirect3DDevice9_SetRenderState(dev, D3DRS_SRCBLEND, D3DBLEND_ONE);
+            IDirect3DDevice9_SetRenderState(dev, D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+            IDirect3DDevice9_SetRenderState(dev, D3DRS_BLENDOP, D3DBLENDOP_ADD);
+        }
+        int w = (int)*(const UINT *)(d->spr + 0x200), h = (int)*(const UINT *)(d->spr + 0x204);
+        int cw = d->cw < 0 || d->cw > w ? w : d->cw, ch = d->ch < 0 || d->ch > h ? h : d->ch;
+        float rect[4] = { (float)d->x, (float)d->y, (float)w, (float)h };
+        float x0 = d->x / fw * 2 - 1, x1 = (d->x + cw) / fw * 2 - 1;
+        float y0 = 1 - d->y / fh * 2, y1 = 1 - (d->y + ch) / fh * 2;
+        float u1 = (float)cw / w, v1 = (float)ch / h;
+        float q[4][6] = {
+            { x0 - hx, y0 + hy, 0, 1, 0, 0 }, { x1 - hx, y0 + hy, 0, 1, u1, 0 },
+            { x0 - hx, y1 + hy, 0, 1, 0, v1 }, { x1 - hx, y1 + hy, 0, 1, u1, v1 },
+        };
+        IDirect3DDevice9_SetPixelShaderConstantF(dev, 2, rect, 1);
+        IDirect3DDevice9_SetTexture(dev, 1, (IDirect3DBaseTexture9 *)e->lo);
+        IDirect3DDevice9_SetTexture(dev, 2, (IDirect3DBaseTexture9 *)e->hd);
+        IDirect3DDevice9_DrawPrimitiveUP(dev, D3DPT_TRIANGLESTRIP, 2, q, sizeof q[0]);
+    }
+    if (ready) {
+        IDirect3DDevice9_SetTexture(dev, 1, NULL);
+        IDirect3DDevice9_SetTexture(dev, 2, NULL);
+    }
 }
 
 /* side bars (MenuSides=1): the game's own wood texture (textures/campmap/Wood2.tga) instead of black around
@@ -435,6 +641,7 @@ int us_present(IDirect3DDevice9 *dev)
         IDirect3DDevice9_SetSamplerState(dev, 0, D3DSAMP_SRGBTEXTURE, FALSE);
         IDirect3DDevice9_DrawPrimitiveUP(dev, D3DPT_TRIANGLESTRIP, 2, q, sizeof q[0]);
         lg_draw(dev, &bd, dw, dh);
+        hd_draw(dev, &bd, dw, dh);
         IDirect3DDevice9_EndScene(dev);
         done = SUCCEEDED(IDirect3DSwapChain9_Present(g_usChain, NULL, NULL, NULL, NULL, 0));
     }
