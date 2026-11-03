@@ -12,6 +12,8 @@ patch scripts and sources; they are applied to your own install.
   display mode, FPS counter, 60 FPS cap.
 - **Sharper menus**: the 800x600 menus are upscaled with a smooth GPU shader instead of a plain
   stretch (borderless mode).
+- **No more black bars beside the menus**: the sides of the 4:3 menus are filled with the game's
+  dark wood texture, with a soft shadow (`MenuSides=1`).
 - **FPS counter** at the top right of the screen (optional).
 - **Frame rate cap** at 60 FPS (optional).
 
