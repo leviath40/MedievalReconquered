@@ -21,7 +21,7 @@ typedef BOOL (WINAPI *PFN_SetCursorPos)(int, int);
 typedef BOOL (WINAPI *PFN_ClipCursor)(const RECT *);
 
 /* config (MedievalReconquered.ini [Display]) */
-extern int g_borderless, g_keepAspect, g_log, g_showFps, g_fpsLimit, g_profile, g_batchUI, g_fastDraw, g_upscale, g_dumpFrame;
+extern int g_borderless, g_keepAspect, g_log, g_showFps, g_fpsLimit, g_profile, g_batchUI, g_fastDraw, g_upscale, g_dumpFrame, g_menuSides;
 extern int g_campW, g_campH, g_batW, g_batH;
 
 /* window and image geometry (proxy.c) */

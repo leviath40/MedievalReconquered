@@ -4,7 +4,7 @@
  *
  * Borderless only. When the game's back buffer is smaller than the image area on the monitor (the
  * 800x600 front end), Present is replaced by: copy the back buffer into a texture, draw it with a
- * pixel shader into our own swap chain at monitor size (black bars outside g_dst), present that.
+ * pixel shader into our own swap chain at monitor size (wood or black bars outside g_dst), present that.
  *   1 = Sharp:  "sharp bilinear" (integer prescale, then a 1-texel-wide linear blend at texel edges)
  *   2 = Smooth: Catmull-Rom bicubic + light unsharp mask
  * Shaders are HLSL compiled at startup with the system d3dcompiler_47.dll. The game's render states
@@ -178,6 +178,87 @@ static void lg_draw(IDirect3DDevice9 *dev, const D3DSURFACE_DESC *bd, int dw, in
     IDirect3DDevice9_SetTexture(dev, 2, NULL);
 }
 
+/* side bars (MenuSides=1): the game's own wood texture (textures/campmap/Wood2.tga) instead of black around
+ * the 4:3 image, darker towards the screen edges, with a soft shadow next to the image */
+static const char g_usPsSides[] =
+    "sampler2D wood : register(s0);  /* tiled, linear, wrap */\n"
+    "float4 c4 : register(c4);       /* monitor w, h, tile size in pixels, shadow width in pixels */\n"
+    "float4 c5 : register(c5);       /* image rect l, t, r, b */\n"
+    "float4 main(float2 uv : TEXCOORD0) : COLOR {\n"
+    "    float2 p = uv * c4.xy;\n"
+    "    float dx = max(max(c5.x - p.x, p.x - c5.z), 0), dy = max(max(c5.y - p.y, p.y - c5.w), 0);\n"
+    "    float edge = saturate(max(dx / max(c5.x, 1), dy / max(c5.y, 1)));  /* 0 at the image, 1 at the screen edge */\n"
+    "    float shadow = lerp(0.5, 1.0, saturate(max(dx, dy) / c4.w));\n"
+    "    float3 c = tex2D(wood, p / c4.z).rgb * (1 - 0.45 * edge) * shadow;\n"
+    "    return float4(c, 1);\n"
+    "}\n";
+static IDirect3DPixelShader9 *g_usPsSidesObj;
+static IDirect3DTexture9 *g_sdWood;
+static int g_sdState;                  /* 0 = not loaded yet, 1 = ready, -1 = unavailable */
+
+/* 24-bit or 32-bit uncompressed TGA -> BGRA texture */
+static int sd_load(IDirect3DDevice9 *dev)
+{
+    if (g_sdState) return g_sdState > 0;
+    g_sdState = -1;
+    char path[MAX_PATH];
+    snprintf(path, sizeof path, "%stextures\\campmap\\Wood2.tga", g_dir);
+    FILE *f = fopen(path, "rb");
+    if (!f) { plog("sides: %s not found, black bars", path); return 0; }
+    BYTE h[18];
+    BYTE *src = NULL, *bgra = NULL;
+    if (fread(h, 1, 18, f) == 18 && h[2] == 2 && (h[16] == 24 || h[16] == 32) && !fseek(f, 18 + h[0], SEEK_SET)) {
+        UINT w = h[12] | h[13] << 8, ht = h[14] | h[15] << 8, bpp = h[16] / 8;
+        if (w && ht && w <= 2048 && ht <= 2048) {
+            src = malloc((size_t)w * ht * bpp);
+            bgra = malloc((size_t)w * ht * 4);
+            if (src && bgra && fread(src, bpp, (size_t)w * ht, f) == (size_t)w * ht) {
+                for (UINT y = 0; y < ht; y++) {
+                    const BYTE *s = src + (size_t)((h[17] & 0x20) ? y : ht - 1 - y) * w * bpp;
+                    for (UINT x = 0; x < w; x++) {
+                        BYTE *d = bgra + ((size_t)y * w + x) * 4;
+                        d[0] = s[x * bpp]; d[1] = s[x * bpp + 1]; d[2] = s[x * bpp + 2]; d[3] = 255;
+                    }
+                }
+                g_sdWood = lg_texture(dev, w, ht, bgra, 1);
+                if (g_sdWood) g_sdState = 1;
+            }
+        }
+    }
+    free(src);
+    free(bgra);
+    fclose(f);
+    plog("sides: wood texture %s", g_sdState > 0 ? "loaded" : "unusable");
+    return g_sdState > 0;
+}
+
+/* first pass, before the image: wood over the whole monitor (the image is drawn over it) */
+static void sd_draw(IDirect3DDevice9 *dev, UINT mw, UINT mh, int dh, UINT bh)
+{
+    if (!g_menuSides || !g_usPsSidesObj || !sd_load(dev)) return;
+    D3DVIEWPORT9 vp = { 0, 0, mw, mh, 0.0f, 1.0f };
+    IDirect3DDevice9_SetViewport(dev, &vp);
+    float k = (float)dh / bh;                       /* monitor pixels per game pixel */
+    float c[8] = { (float)mw, (float)mh, 512.0f * k, 6.0f * k,
+                   (float)g_dst.left, (float)g_dst.top, (float)g_dst.right, (float)g_dst.bottom };
+    IDirect3DDevice9_SetPixelShaderConstantF(dev, 4, c, 2);
+    IDirect3DDevice9_SetPixelShader(dev, g_usPsSidesObj);
+    IDirect3DDevice9_SetTexture(dev, 0, (IDirect3DBaseTexture9 *)g_sdWood);
+    IDirect3DDevice9_SetSamplerState(dev, 0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+    IDirect3DDevice9_SetSamplerState(dev, 0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+    IDirect3DDevice9_SetSamplerState(dev, 0, D3DSAMP_MIPFILTER, D3DTEXF_LINEAR);
+    IDirect3DDevice9_SetSamplerState(dev, 0, D3DSAMP_ADDRESSU, D3DTADDRESS_WRAP);
+    IDirect3DDevice9_SetSamplerState(dev, 0, D3DSAMP_ADDRESSV, D3DTADDRESS_WRAP);
+    IDirect3DDevice9_SetSamplerState(dev, 0, D3DSAMP_SRGBTEXTURE, FALSE);
+    IDirect3DDevice9_SetSamplerState(dev, 0, D3DSAMP_MAXMIPLEVEL, 0);
+    float hx = 1.0f / mw, hy = 1.0f / mh;
+    float q[4][6] = {
+        { -1 - hx,  1 + hy, 0, 1, 0, 0 }, { 1 - hx,  1 + hy, 0, 1, 1, 0 },
+        { -1 - hx, -1 + hy, 0, 1, 0, 1 }, { 1 - hx, -1 + hy, 0, 1, 1, 1 },
+    };
+    IDirect3DDevice9_DrawPrimitiveUP(dev, D3DPT_TRIANGLESTRIP, 2, q, sizeof q[0]);
+}
+
 static IDirect3DVertexShader9 *g_usVsObj;
 static IDirect3DVertexDeclaration9 *g_usDecl;
 static IDirect3DSwapChain9 *g_usChain;
@@ -225,6 +306,9 @@ static int us_setup(IDirect3DDevice9 *dev, const D3DSURFACE_DESC *bd)
             if (!b || FAILED(IDirect3DDevice9_CreatePixelShader(dev, b->vt->ptr(b), &g_usPs[i]))) goto fail;
             b->vt->release(b);
         }
+        b = us_compile(g_usPsSides, "ps_3_0");      /* optional: black bars without it */
+        if (b && FAILED(IDirect3DDevice9_CreatePixelShader(dev, b->vt->ptr(b), &g_usPsSidesObj))) g_usPsSidesObj = NULL;
+        if (b) b->vt->release(b);
         static const D3DVERTEXELEMENT9 el[] = {
             { 0, 0, D3DDECLTYPE_FLOAT4, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_POSITION, 0 },
             { 0, 16, D3DDECLTYPE_FLOAT2, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_TEXCOORD, 0 },
@@ -314,20 +398,8 @@ int us_present(IDirect3DDevice9 *dev)
     IDirect3DDevice9_SetRenderTarget(dev, 0, out);
     IDirect3DDevice9_SetDepthStencilSurface(dev, NULL);
     IDirect3DDevice9_Clear(dev, 0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, 0, 0), 1.0f, 0);
-    D3DVIEWPORT9 vp = { (DWORD)g_dst.left, (DWORD)g_dst.top, (DWORD)dw, (DWORD)dh, 0.0f, 1.0f };
-    IDirect3DDevice9_SetViewport(dev, &vp);
     IDirect3DDevice9_SetVertexDeclaration(dev, g_usDecl);
     IDirect3DDevice9_SetVertexShader(dev, g_usVsObj);
-    IDirect3DDevice9_SetPixelShader(dev, g_usPs[g_upscale]);
-    IDirect3DDevice9_SetTexture(dev, 0, (IDirect3DBaseTexture9 *)g_usTex);
-    for (int s = 0; s < 1; s++) {
-        IDirect3DDevice9_SetSamplerState(dev, s, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
-        IDirect3DDevice9_SetSamplerState(dev, s, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
-        IDirect3DDevice9_SetSamplerState(dev, s, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
-        IDirect3DDevice9_SetSamplerState(dev, s, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
-        IDirect3DDevice9_SetSamplerState(dev, s, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
-        IDirect3DDevice9_SetSamplerState(dev, s, D3DSAMP_SRGBTEXTURE, FALSE);
-    }
     IDirect3DDevice9_SetRenderState(dev, D3DRS_ZENABLE, FALSE);
     IDirect3DDevice9_SetRenderState(dev, D3DRS_ZWRITEENABLE, FALSE);
     IDirect3DDevice9_SetRenderState(dev, D3DRS_ALPHABLENDENABLE, FALSE);
@@ -342,7 +414,6 @@ int us_present(IDirect3DDevice9 *dev)
     if (prescale < 1) prescale = 1;
     float c[8] = { (float)bd.Width, (float)bd.Height, 1.0f / bd.Width, 1.0f / bd.Height,
                    (float)dw, (float)dh, prescale, 0.35f };
-    IDirect3DDevice9_SetPixelShaderConstantF(dev, 0, c, 2);
     /* full-viewport quad, shifted half a pixel (D3D9 pixel centres) */
     float hx = 1.0f / dw, hy = 1.0f / dh;
     float q[4][6] = {
@@ -350,6 +421,18 @@ int us_present(IDirect3DDevice9 *dev)
         { -1 - hx, -1 + hy, 0, 1, 0, 1 }, { 1 - hx, -1 + hy, 0, 1, 1, 1 },
     };
     if (SUCCEEDED(IDirect3DDevice9_BeginScene(dev))) {
+        sd_draw(dev, (UINT)(g_mon.right - g_mon.left), (UINT)(g_mon.bottom - g_mon.top), dh, bd.Height);
+        D3DVIEWPORT9 vp = { (DWORD)g_dst.left, (DWORD)g_dst.top, (DWORD)dw, (DWORD)dh, 0.0f, 1.0f };
+        IDirect3DDevice9_SetViewport(dev, &vp);
+        IDirect3DDevice9_SetPixelShaderConstantF(dev, 0, c, 2);
+        IDirect3DDevice9_SetPixelShader(dev, g_usPs[g_upscale]);
+        IDirect3DDevice9_SetTexture(dev, 0, (IDirect3DBaseTexture9 *)g_usTex);
+        IDirect3DDevice9_SetSamplerState(dev, 0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+        IDirect3DDevice9_SetSamplerState(dev, 0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+        IDirect3DDevice9_SetSamplerState(dev, 0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+        IDirect3DDevice9_SetSamplerState(dev, 0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+        IDirect3DDevice9_SetSamplerState(dev, 0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+        IDirect3DDevice9_SetSamplerState(dev, 0, D3DSAMP_SRGBTEXTURE, FALSE);
         IDirect3DDevice9_DrawPrimitiveUP(dev, D3DPT_TRIANGLESTRIP, 2, q, sizeof q[0]);
         lg_draw(dev, &bd, dw, dh);
         IDirect3DDevice9_EndScene(dev);
