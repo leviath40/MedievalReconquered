@@ -11,6 +11,7 @@
  *                   HD sprites (Upscale, MenuSides, HDIcons)
  *   card_shadow.c   smooth ground shadows on the HD unit cards
  *   game_patches.c  in-memory game code patches: Video menu switch, resolution override, BatchUI, CardIcons
+ *   hdtex.c         HD battle textures: HDTextures swap, TexSurvey report (debug)
  *   icons.c         sprite blitter hook: per-frame blit list for HDIcons, IconLog (debug)
  *   proxy.h         shared declarations
  *
@@ -48,6 +49,8 @@
  *                    ;     new file past 4 MB; 0 = off)
  *   MenuSides=1      ; with Upscale: fill the bars beside 4:3 screens with the game's wood texture (0 = black)
  *   IconLog=0        ; debug: 1 = log sprite draws to icons.log (icons.c)
+ *   HDTextures=0     ; 1 = swap battle textures for hd_textures/<hash>.png (hdtex.c)
+ *   TexSurvey=0      ; debug: 1 = list and dump the textures the game uses (hdtex.c)
  *   HDIcons=0        ; with Upscale: draw HD copies of sprites from hd_icons/ (patches/hd_icons)
  *   DumpFrame=0      ; debug: 1 = F11 saves frame_<n>.raw/.txt and final_<n>.raw
  *   Log=0            ; 1 = write borderless.log
@@ -65,7 +68,7 @@ static PFN_ClipCursor g_realClipCursor;
 
 int g_cardIcons = 1;
 IDirect3DDevice9 *g_dev9;
-int g_borderless = 1, g_keepAspect = 1, g_log = 0, g_showFps = 0, g_fpsLimit = 0, g_profile = 1, g_batchUI = 1, g_fastDraw = 1, g_upscale = 2, g_dumpFrame = 0, g_menuSides = 1, g_iconLog = 0, g_hdIcons = 0;
+int g_borderless = 1, g_keepAspect = 1, g_log = 0, g_showFps = 0, g_fpsLimit = 0, g_profile = 1, g_batchUI = 1, g_fastDraw = 1, g_upscale = 2, g_dumpFrame = 0, g_menuSides = 1, g_iconLog = 0, g_hdIcons = 0, g_texSurvey = 0, g_hdTextures = 0;
 int g_campW, g_campH, g_batW, g_batH;   /* resolution overrides from the ini, 0 = off */
 HWND g_hwnd;
 static WNDPROC g_origWndProc;
@@ -110,6 +113,8 @@ static void load_config(void)
     g_dumpFrame = GetPrivateProfileIntA("Display", "DumpFrame", 0, ini);
     g_menuSides = GetPrivateProfileIntA("Display", "MenuSides", 1, ini);
     g_iconLog = GetPrivateProfileIntA("Display", "IconLog", 0, ini);
+    g_texSurvey = GetPrivateProfileIntA("Display", "TexSurvey", 0, ini);
+    g_hdTextures = GetPrivateProfileIntA("Display", "HDTextures", 0, ini);
     g_hdIcons = GetPrivateProfileIntA("Display", "HDIcons", 0, ini);
     if (g_upscale < 0 || g_upscale > 2) g_upscale = 2;
     if (g_fpsLimit < 0 || g_fpsLimit > 1000) g_fpsLimit = 0;
@@ -329,6 +334,7 @@ static HRESULT present_frame(IDirect3DDevice9 *dev, const RECT *src, const RECT 
 static HRESULT STDMETHODCALLTYPE hk_Present(IDirect3DDevice9 *dev, const RECT *src, const RECT *dst,
                                             HWND wnd, const RGNDATA *dirty)
 {
+    hd_frame();
     HRESULT hr;
     if (g_fpsLimit) {
         LONGLONG t0 = qpc();
@@ -361,6 +367,7 @@ static HRESULT STDMETHODCALLTYPE hk_CreateDevice(IDirect3D9 *d3d, UINT adapter, 
             g_dev9 = *out;
             fd_install(*out);
             prof_install(*out);
+            if (g_hdTextures || g_texSurvey) hd_install(*out);
         }
         return hr0;
     }
@@ -387,6 +394,7 @@ static HRESULT STDMETHODCALLTYPE hk_CreateDevice(IDirect3D9 *d3d, UINT adapter, 
         g_dev9 = *out;
         fd_install(*out);
         prof_install(*out);
+        if (g_hdTextures || g_texSurvey) hd_install(*out);
         install_hooks();
     }
     return hr;
