@@ -116,6 +116,7 @@ static void load_config(void)
     g_texSurvey = GetPrivateProfileIntA("Display", "TexSurvey", 0, ini);
     g_hdTextures = GetPrivateProfileIntA("Display", "HDTextures", 0, ini);
     g_hdIcons = GetPrivateProfileIntA("Display", "HDIcons", 0, ini);
+    g_mouseRotate = GetPrivateProfileIntA("Display", "MouseRotate", 1, ini);
     if (g_upscale < 0 || g_upscale > 2) g_upscale = 2;
     if (g_fpsLimit < 0 || g_fpsLimit > 1000) g_fpsLimit = 0;
     g_campW = GetPrivateProfileIntA("Display", "CampaignWidth", 0, ini);
@@ -177,6 +178,7 @@ static void to_client(int *x, int *y)
 
 static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
+    if (msg == WM_MOUSEMOVE && g_camDrag) return 0;
     switch (msg) {
     case WM_WINDOWPOSCHANGING: {           /* keep the window at monitor size */
         WINDOWPOS *p = (WINDOWPOS *)lp;
@@ -335,6 +337,7 @@ static HRESULT STDMETHODCALLTYPE hk_Present(IDirect3DDevice9 *dev, const RECT *s
                                             HWND wnd, const RGNDATA *dirty)
 {
     hd_frame();
+    cam_frame();
     HRESULT hr;
     if (g_fpsLimit) {
         LONGLONG t0 = qpc();
@@ -455,6 +458,7 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID r)
         patch_resolution();
         if (g_batchUI) patch_ui_batch();
         if (g_cardIcons) patch_card_icon();
+        if (g_mouseRotate) patch_tilt_limit();
         if (g_iconLog || g_hdIcons) patch_icons();
         CloseHandle(CreateThread(NULL, 0, altf4_thread, NULL, 0, NULL));
     }
