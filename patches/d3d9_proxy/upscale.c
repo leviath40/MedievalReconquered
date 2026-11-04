@@ -104,7 +104,7 @@ static IDirect3DTexture9 *g_lgSpr, *g_lgHd;
 static float g_lgRect[4], g_lgTone[4];
 static int g_lgState;                  /* 0 = not loaded yet, 1 = ready, -1 = unavailable */
 
-static IDirect3DTexture9 *lg_texture(IDirect3DDevice9 *dev, UINT w, UINT h, const BYTE *bgra, int mips)
+IDirect3DTexture9 *lg_texture(IDirect3DDevice9 *dev, UINT w, UINT h, const BYTE *bgra, int mips)
 {
     IDirect3DTexture9 *t = NULL;
     D3DLOCKED_RECT lr;
@@ -205,7 +205,7 @@ static const GUID kFmtPbgra = { 0x6fddc324, 0x4e03, 0x4bfe, { 0xb1, 0x85, 0x3d, 
 static IWICImagingFactory *g_wic;
 
 /* premultiplied BGRA pixels of a PNG, or NULL */
-static BYTE *hd_png(const char *path, UINT *w, UINT *h)
+BYTE *hd_png(const char *path, UINT *w, UINT *h)
 {
     if (!g_wic) {
         CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);          /* fine if COM is already set up */

@@ -40,6 +40,8 @@ Upscale=2      ; borderless: upscale low-res screens (the 800x600 menus) with a 
 MenuSides=1    ; with Upscale: fill the bars beside the 4:3 menus with the game's wood texture (textures/campmap/Wood2.tga), 0 = black
 IconLog=0      ; debug: 1 = log sprite draws (file hash, position) to icons.log, 2 = also survey the other 2D routines
 HDIcons=0      ; with Upscale: draw HD copies of sprites from hd_icons/ (built by patches/hd_icons/build_icons.py)
+HDTextures=0   ; swap battle textures for hd_textures/<hash>.jpg or .png (built by patches/hd_battle/build_textures.py)
+TexSurvey=0    ; debug: list the textures the game uses in tex_survey.txt and save them in tex_dump/
 DumpFrame=0    ; debug: 1 = F11 saves frame_<n>.raw/.txt and final_<n>.raw
 FastDraw=1     ; 1 = DrawIndexedPrimitiveUP replayed through dynamic buffers (report §11)
 Profile=1      ; 1 = write profile.log (frame-time breakdown; on by default, restarts past 4 MB)
@@ -69,6 +71,8 @@ still work during a session. A resolution the game does not offer is ignored (lo
   initialisers run, the proxy copies it with a label and a switch appended (cloned from the
   Wildlife ones) and points the game at the copy. The switch callback mirrors the Smoke switch
   and writes `Borderless=` to the ini. Details and addresses: `analysis/MedievalReconquered_overview.md` §7.
+- HD battle textures: `hdtex.c` hashes each game texture at its first bind and binds the matching HD picture
+  instead, with mip levels and anisotropic filtering. Details: report section 15.
 - Alt+F4: the game ignores it, so a small thread polls the keys and ends the process at once when
   the game has focus. It works on loading screens and during hangs. Nothing is saved.
 - Resolution override: `Medieval.Cfg` stores the campaign/battle resolutions as indices into
