@@ -240,9 +240,13 @@ BYTE *g_cardPtr;                             /* card being drawn: esi at the hoo
 /* Same draw as 0x4CC0A0, with the unit's HD picture bound in place of the atlas. 0 = no HD picture. */
 static int card_icon_hd(float x, float y, float size, DWORD color)
 {
+    /* A device reset (every alt-tab) goes through 0x4DA2A0, which invalidates the list by writing -1 to its first
+     * entry and rebuilds the atlas from it, empty. So keep our own copy: the unit of the first card is still known. */
+    static int ids[17];
+    if (CARD_ICON_IDS[0] != -1) memcpy(ids, CARD_ICON_IDS, sizeof ids);
     int i = *(int *)(g_cardPtr + 0x2C);
-    if (!g_dev9 || !g_hdIcons || i < 0 || i >= 17 || CARD_ICON_IDS[i] == -1) return 0;
-    BYTE *info = ((BYTE *(__cdecl *)(int))0x72B2A0)(CARD_ICON_IDS[i]);
+    if (!g_dev9 || !g_hdIcons || i < 0 || i >= 17 || ids[i] == -1) return 0;
+    BYTE *info = ((BYTE *(__cdecl *)(int))0x72B2A0)(ids[i]);
     BYTE *player = *(BYTE **)0xB4275C;       /* faction colours: as the icon loader's callback 0x4DA5B0 */
     const BYTE *c = (const BYTE *)0x799F7C + (player ? *(*(BYTE **)(player + 0x374) + 4) : 0) * 6;
     char colours[13];                        /* by value: SetFactionCol replaces the table's defaults */
@@ -265,8 +269,7 @@ static int card_icon_hd(float x, float y, float size, DWORD color)
     IDirect3DDevice9_GetTexture(g_dev9, 0, &old);
     IDirect3DDevice9_SetTexture(g_dev9, 0, (IDirect3DBaseTexture9 *)tex);
     void *gd = *(void **)0x8DCCF8;
-    card_draw_fn draw = (*(card_draw_fn **)gd)[0x70 / 4];
-    draw(gd, 5, 0x1C4, v, 4, 0);
+    (*(card_draw_fn **)gd)[0x70 / 4](gd, 5, 0x1C4, v, 4, 0);
     IDirect3DDevice9_SetTexture(g_dev9, 0, old);
     if (old) IDirect3DBaseTexture9_Release(old);
     return 1;
