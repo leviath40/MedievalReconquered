@@ -21,3 +21,12 @@ each sprite over it, only on pixels that still show the original sprite, so text
 cursor drawn on top are kept. Sprites made at runtime (portraits converted from `.tga`, recoloured unit
 cards) have no file on disk: the proxy saves them once to `hd_icons/_pending/`, and the next run of the
 script upscales them. Run it again after playing to pick those up.
+
+Faction colours: the game recolours unit cards per faction, so each faction needs its own files.
+
+    python patches\hd_icons\faction_cards.py        queues every campaign unit card in all 33 colour pairs
+    python patches\hd_icons\build_icons.py          upscales the queue
+    python patches\hd_icons\build_card_icons.py     battle unit-card pictures (hd_icons/battle/)
+
+The battle pictures are used with `CardIcons=1` and `HDIcons=1` (report section 14). Sprites the proxy sees with no HD copy still land in
+`hd_icons/_pending/`: run `build_icons.py` after playing to pick them up.

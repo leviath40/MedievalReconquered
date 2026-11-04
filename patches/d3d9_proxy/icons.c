@@ -7,7 +7,7 @@
  * entry is a Proteus hook site (jmp 0xF43389), so instead every `call 0x73D47E` in .text is redirected
  * to hk_blit, which logs and calls the original. The sprite struct is the loaded BIF: 256 x u16 palette,
  * then +0x200 width, +0x204 height, +0x20C/+0x210 frame counts. Each sprite is identified by an FNV-1a
- * hash of its first 0x214 bytes (palette + header), which tools can match against the files on disk.
+ * hash (sprite_hash: palette, header, three pixel rows), which tools can match against the files on disk.
  * icons.log gets one line per new (hash, x, y, frame, caller), capped at 20000 lines.
  * With HDIcons=1 every blit of the frame is also recorded (g_icDraws) for the upscaler, which draws HD
  * copies over them (upscale.c); the list is cleared after each Present.
@@ -27,20 +27,99 @@ DWORD fnv(const BYTE *p, int n, DWORD h)
     return h;
 }
 
+/* Sprite identity: palette + header + three pixel rows of frame 0. Many sprites share a palette and size, so
+ * the first 0x214 bytes alone don't tell them apart. Same code in patches/hd_icons/build_icons.py. */
+static DWORD sprite_hash(const BYTE *spr)
+{
+    DWORD h = fnv(spr, 0x214, 2166136261u);
+    UINT rows = *(const UINT *)(spr + 0x204);
+    if (!rows || rows > 2048) return h;
+    const BYTE *p = spr + 0x214 + *(const UINT *)(spr + 0x214);
+    for (UINT y = 0; y <= rows * 3 / 4; y++) {
+        UINT len = *(const WORD *)p;
+        if (len < 2 || len > 16384) break;
+        if (y == rows / 4 || y == rows / 2 || y == rows * 3 / 4) h = fnv(p, (int)len, h);
+        p += len;
+    }
+    return h;
+}
+
+/* Hidden buffers: list panels (the campaign army panel...) blit their cards into an off-screen buffer, only when
+ * something changes, then 0x73BDB1 copies it to the screen every frame. Blits to a target that isn't screen sized
+ * are remembered per buffer; each copy to the screen turns them into screen placements (report section 14). */
+#define COPY_FN    0x73BDB1
+#define TARGET     (*(BYTE **)0x8D0248)
+#define TARGET_W   (*(int *)0x8D01B4)
+#define TARGET_H   (*(int *)0x8D01B8)
+#define BUF_MAX    16
+#define BUF_RECS   128
+typedef struct { BYTE *base; int n, next; IcDraw r[BUF_RECS]; } SprBuf;
+static SprBuf g_bufs[BUF_MAX];
+static int g_bufNext;
+
+static void buf_add(const IcDraw *d)
+{
+    BYTE *base = TARGET;
+    SprBuf *b = NULL;
+    for (int i = 0; i < BUF_MAX && !b; i++) if (g_bufs[i].base == base) b = &g_bufs[i];
+    if (!b) {
+        b = &g_bufs[g_bufNext];
+        g_bufNext = (g_bufNext + 1) % BUF_MAX;
+        b->base = base; b->n = b->next = 0;
+    }
+    IcDraw *r = NULL;
+    for (int i = 0; i < b->n && !r; i++) {               /* a redraw replaces what was at that spot */
+        const IcDraw *o = &b->r[i];
+        if (o->x == d->x && o->y == d->y && o->frame == d->frame && o->cw == d->cw && o->ch == d->ch) r = &b->r[i];
+    }
+    if (!r) {
+        r = &b->r[b->next];
+        b->next = (b->next + 1) % BUF_RECS;
+        if (b->n < BUF_RECS) b->n++;
+    }
+    *r = *d;
+}
+
+static void __cdecl hk_copy(BYTE *src, int srcPitch, BYTE *dst, int dstPitch, int w, int h)
+{
+    ((void (__cdecl *)(BYTE *, int, BYTE *, int, int, int))COPY_FN)(src, srcPitch, dst, dstPitch, w, h);
+    if (!g_hdIcons || TARGET_W != g_bbW || TARGET_H != g_bbH || srcPitch <= 0 || dstPitch <= 0) return;
+    int dstOff = (int)(dst - TARGET);
+    if (dstOff < 0 || dstOff >= dstPitch * g_bbH) return;
+    SprBuf *b = NULL;
+    for (int i = 0; i < BUF_MAX; i++)                    /* src can be inside the buffer: nearest base below it */
+        if (g_bufs[i].base && g_bufs[i].base <= src && src < g_bufs[i].base + srcPitch * 2048 &&
+            (!b || g_bufs[i].base > b->base)) b = &g_bufs[i];
+    if (!b) return;
+    int srcOff = (int)(src - b->base), sx = srcOff % srcPitch / 2, sy = srcOff / srcPitch;
+    int dx = dstOff % dstPitch / 2, dy = dstOff / dstPitch;
+    for (int i = 0; i < b->n && g_icN < IC_MAX; i++) {
+        IcDraw *r = &b->r[i];
+        int x = r->x - sx, y = r->y - sy;
+        if (x < 0 || y < 0 || x >= w || y >= h) continue;
+        int cw = r->cw < 0 || r->cw > r->w ? r->w : r->cw, ch = r->ch < 0 || r->ch > r->h ? r->h : r->ch;
+        if (cw > w - x) cw = w - x;
+        if (ch > h - y) ch = h - y;
+        IcDraw *d = &g_icDraws[g_icN++];
+        *d = *r;
+        r->spr = NULL;                                       /* used once to load: it may go away later */
+        d->x = dx + x; d->y = dy + y; d->cw = cw; d->ch = ch;
+    }
+}
+
 static int __cdecl hk_blit(BYTE *spr, int x, int y, int frame, int cw, int ch)
 {
     DWORD ret = (DWORD)__builtin_return_address(0) - 5;
     if (g_hdIcons && spr && g_icN < IC_MAX) {
         UINT w = *(UINT *)(spr + 0x200), h = *(UINT *)(spr + 0x204), n = *(UINT *)(spr + 0x20C) * *(UINT *)(spr + 0x210);
         if (w && h && w <= 2048 && h <= 2048 && n && n <= 4096) {
-            IcDraw *d = &g_icDraws[g_icN++];
-            d->spr = spr; d->hash = fnv(spr, 0x214, 2166136261u); d->last = 0;
-            d->x = x; d->y = y; d->frame = frame < 0 ? 0 : (int)((UINT)frame % n); d->cw = cw; d->ch = ch;
-            d->w = (int)w; d->h = (int)h;
+            IcDraw d = { spr, sprite_hash(spr), 0, x, y, frame < 0 ? 0 : (int)((UINT)frame % n), cw, ch, (int)w, (int)h };
+            if (TARGET_W == g_bbW && TARGET_H == g_bbH) g_icDraws[g_icN++] = d;
+            else if (cw && ch) buf_add(&d);              /* cards are blitted again with a 0x0 clip: nothing drawn */
         }
     }
     if (g_icLog && spr && g_icLines < 20000) {
-        DWORD h = fnv(spr, 0x214, 2166136261u);
+        DWORD h = sprite_hash(spr);
         DWORD k[5] = { h, (DWORD)x, (DWORD)y, (DWORD)frame, ret };
         DWORD key = fnv((const BYTE *)k, sizeof k, 2166136261u) | 1;
         DWORD i = key & 0xFFFF;
@@ -128,12 +207,14 @@ void patch_icons(void)
         if (memcmp(sec->Name, ".text", 5)) continue;
         BYTE *p = base + sec->VirtualAddress, *end = p + sec->Misc.VirtualSize - 5;
         for (; p < end; p++) {
-            if (*p != 0xE8 || (DWORD)(p + 5) + *(int *)(p + 1) != BLIT_FN) continue;
-            int rel = (int)((DWORD)hk_blit - (DWORD)(p + 5));
+            if (*p != 0xE8) continue;
+            DWORD to = (DWORD)(p + 5) + *(int *)(p + 1);
+            if (to != BLIT_FN && to != COPY_FN) continue;
+            int rel = (int)((DWORD)(to == BLIT_FN ? (void *)hk_blit : (void *)hk_copy) - (DWORD)(p + 5));
             if (patch_mem(p + 1, &rel, 4)) n++;
         }
     }
-    plog("icons: %d blitter calls redirected (IconLog=%d HDIcons=%d)", n, g_iconLog, g_hdIcons);
+    plog("icons: %d blit and copy calls redirected (IconLog=%d HDIcons=%d)", n, g_iconLog, g_hdIcons);
     if (g_icLog) { fprintf(g_icLog, "# %d call sites redirected\n", n); fflush(g_icLog); }
     if (g_iconLog == 2 && g_icLog) survey_install(base, nt);
 }

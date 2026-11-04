@@ -21,6 +21,8 @@ typedef BOOL (WINAPI *PFN_SetCursorPos)(int, int);
 typedef BOOL (WINAPI *PFN_ClipCursor)(const RECT *);
 
 /* config (MedievalReconquered.ini [Display]) */
+extern int g_cardIcons;
+extern IDirect3DDevice9 *g_dev9;
 extern int g_borderless, g_keepAspect, g_log, g_showFps, g_fpsLimit, g_profile, g_batchUI, g_fastDraw, g_upscale, g_dumpFrame, g_menuSides, g_iconLog, g_hdIcons;
 extern int g_campW, g_campH, g_batW, g_batH;
 
@@ -61,11 +63,14 @@ void fd_release(void);
 
 /* upscale.c */
 int us_present(IDirect3DDevice9 *dev);
+void card_shadow(const unsigned char *l, unsigned char *hd);
+IDirect3DTexture9 *hd_card(IDirect3DDevice9 *dev, const char *name, const char *colours);
 void us_release(void);
 
 /* game_patches.c */
 void patch_video_menu(void);
 void patch_resolution(void);
 void patch_ui_batch(void);
+void patch_card_icon(void);
 
 #endif

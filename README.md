@@ -31,8 +31,9 @@ patch scripts and sources; they are applied to your own install.
   banner (`patches/logo/`).
 - **New icon** for the game and the launcher (`patches/icon/`).
 - **New campaign map** painting, AI-upscaled to the game's 4096x3072 (`patches/campmap/`).
-- **HD icons** on the menus and the campaign map: unit/building cards, portraits, info pictures,
+- **HD icons** on the menus and the campaign map: unit cards in every faction colour, building cards, portraits, info pictures,
   shields, buttons and panels are AI-upscaled and drawn at full resolution (`patches/hd_icons/`, `HDIcons=1`).
+- **Bigger soldier icons** on the battle unit cards: the widescreen layout bug that squeezed them is fixed and the pictures are AI-upscaled (`CardIcons=1`, `patches/hd_icons/`).
 - **Boot intro skipped** (the game's own `skipcredits.txt` switch).
 
 ### Tools and research
