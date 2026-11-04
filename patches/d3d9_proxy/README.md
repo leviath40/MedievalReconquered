@@ -40,7 +40,7 @@ Upscale=2      ; borderless: upscale low-res screens (the 800x600 menus) with a 
 MenuSides=1    ; with Upscale: fill the bars beside the 4:3 menus with the game's wood texture (textures/campmap/Wood2.tga), 0 = black
 IconLog=0      ; debug: 1 = log sprite draws (file hash, position) to icons.log, 2 = also survey the other 2D routines
 HDIcons=0      ; with Upscale: draw HD copies of sprites from hd_icons/ (built by patches/hd_icons/build_icons.py)
-DumpFrame=0    ; debug: 1 = save one raw back buffer to frame.raw
+DumpFrame=0    ; debug: 1 = F11 saves frame_<n>.raw/.txt and final_<n>.raw
 FastDraw=1     ; 1 = DrawIndexedPrimitiveUP replayed through dynamic buffers (report §11)
 Profile=1      ; 1 = write profile.log (frame-time breakdown; on by default, restarts past 4 MB)
 Log=0          ; 1 = write borderless.log

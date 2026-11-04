@@ -24,9 +24,9 @@ script upscales them. Run it again after playing to pick those up.
 
 Faction colours: the game recolours unit cards per faction, so each faction needs its own files.
 
-    python patches\hd_iconsaction_cards.py        queues every campaign unit card in all 33 colour pairs
-    python patches\hd_iconsuild_icons.py          upscales the queue
-    python patches\hd_iconsuild_card_icons.py     battle unit-card pictures (hd_icons/battle/)
+    python patches\hd_icons\faction_cards.py        queues every campaign unit card in all 33 colour pairs
+    python patches\hd_icons\build_icons.py          upscales the queue
+    python patches\hd_icons\build_card_icons.py     battle unit-card pictures (hd_icons/battle/)
 
 The battle pictures are used with `CardIcons=1` and `HDIcons=1` (report section 14). Sprites the proxy sees with no HD copy still land in
 `hd_icons/_pending/`: run `build_icons.py` after playing to pick them up.

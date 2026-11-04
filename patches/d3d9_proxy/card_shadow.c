@@ -11,9 +11,13 @@
 #define Z 4
 #define HD (N * Z)
 
+#define TOP (N * 31 / 50)                                    /* shadows lie below this row */
+
 typedef unsigned char u8;
 
-static int s_op(const u8 *l, int x, int y) { return x >= 0 && y >= 0 && x < N && y < N && l[(y * N + x) * 4 + 3]; }
+static int s_in(int x, int y) { return x >= 0 && y >= 0 && x < N && y < N; }
+
+static int s_op(const u8 *l, int x, int y) { return s_in(x, y) && l[(y * N + x) * 4 + 3]; }
 static int s_r(const u8 *l, int x, int y) { return l[(y * N + x) * 4 + 2]; }
 static int s_g(const u8 *l, int x, int y) { return l[(y * N + x) * 4 + 1]; }
 static int s_b(const u8 *l, int x, int y) { return l[(y * N + x) * 4]; }
@@ -27,32 +31,36 @@ static int s_grey(const u8 *l, int x, int y)
 
 static const int s_dx[4] = { 1, -1, 0, 0 }, s_dy[4] = { 0, 0, 1, -1 };
 
-/* l: low-res sprite, BGRA, alpha 0 = transparent. hd: picture on parchment, BGRA. Returns 1 if it changed hd. */
-int card_shadow(const u8 *l, u8 *hd)
+/* 2x2 opening: sets in dst every cell of a 2x2 block that is full in src, which drops one-pixel lines */
+static void s_open(const u8 src[N][N], u8 dst[N][N])
+{
+    for (int y = 0; y + 1 < N; y++)
+        for (int x = 0; x + 1 < N; x++)
+            if (src[y][x] && src[y][x + 1] && src[y + 1][x] && src[y + 1][x + 1])
+                dst[y][x] = dst[y][x + 1] = dst[y + 1][x] = dst[y + 1][x + 1] = 1;
+}
+
+/* l: low-res sprite, BGRA, alpha 0 = transparent. hd: picture on parchment, BGRA. */
+void card_shadow(const u8 *l, u8 *hd)
 {
     static const float K[3] = { 207, 207, 199 };             /* parchment, r g b */
     u8 d[N][N], o[N][N], m[N][N], r[N][N], seen[N][N];
-    short stack[N * N * 4][2], cell[N * N][2];
+    short cell[N * N][2];                                    /* one blob, also the flood fill's work list */
     memset(d, 0, sizeof d); memset(o, 0, sizeof o); memset(m, 0, sizeof m); memset(r, 0, sizeof r);
     memset(seen, 0, sizeof seen);
-    for (int y = N * 31 / 50; y < N; y++)
+    for (int y = TOP; y < N; y++)
         for (int x = 0; x < N; x++)
             d[y][x] = s_grey(l, x, y) && s_g(l, x, y) >= 60 && s_g(l, x, y) <= 175;
-    for (int y = 0; y + 1 < N; y++)                          /* 2x2 opening: drops the lines beside spears */
-        for (int x = 0; x + 1 < N; x++)
-            if (d[y][x] && d[y][x + 1] && d[y + 1][x] && d[y + 1][x + 1])
-                o[y][x] = o[y][x + 1] = o[y + 1][x] = o[y + 1][x + 1] = 1;
-    int found = 0;
+    s_open((const u8 (*)[N])d, o);                           /* drops the lines beside spears */
     for (int sy = 0; sy < N; sy++)
         for (int sx = 0; sx < N; sx++) {
             if (!o[sy][sx] || seen[sy][sx]) continue;
             u8 in[N][N];
-            int nc = 0, sp = 0, x0 = N, x1 = -1, y0 = N, y1 = -1, sumy = 0;
+            int nc = 1, x0 = N, x1 = -1, y0 = N, y1 = -1, sumy = 0;
             memset(in, 0, sizeof in);
-            seen[sy][sx] = 1; stack[sp][0] = (short)sx; stack[sp++][1] = (short)sy;
-            while (sp) {
-                int x = stack[--sp][0], y = stack[sp][1];
-                cell[nc][0] = (short)x; cell[nc++][1] = (short)y;
+            seen[sy][sx] = 1; cell[0][0] = (short)sx; cell[0][1] = (short)sy;
+            for (int c = 0; c < nc; c++) {
+                int x = cell[c][0], y = cell[c][1];
                 in[y][x] = 1;
                 sumy += y;
                 if (x < x0) x0 = x;
@@ -61,19 +69,19 @@ int card_shadow(const u8 *l, u8 *hd)
                 if (y > y1) y1 = y;
                 for (int k = 0; k < 4; k++) {
                     int nx = x + s_dx[k], ny = y + s_dy[k];
-                    if (nx < 0 || ny < 0 || nx >= N || ny >= N || !o[ny][nx] || seen[ny][nx]) continue;
+                    if (!s_in(nx, ny) || !o[ny][nx] || seen[ny][nx]) continue;
                     if (abs(s_g(l, nx, ny) - s_g(l, x, y)) > 40) continue;
-                    seen[ny][nx] = 1; stack[sp][0] = (short)nx; stack[sp++][1] = (short)ny;
+                    seen[ny][nx] = 1; cell[nc][0] = (short)nx; cell[nc++][1] = (short)ny;
                 }
             }
             /* a blob reaching the top of the search area is the lower part of something taller (shield, horse) */
             int bw = x1 - x0 + 1, bh = y1 - y0 + 1;
-            if (y0 <= N * 31 / 50 || nc < 10 || bw < 6 || bw * 10 < bh * 9 || sumy * 100 < nc * N * 55) continue;
+            if (y0 <= TOP || nc < 10 || bw < 6 || bw * 10 < bh * 9 || sumy * 100 < nc * N * 55) continue;
             int per = 0, out = 0;
             for (int i = 0; i < nc; i++)
                 for (int k = 0; k < 4; k++) {
                     int nx = cell[i][0] + s_dx[k], ny = cell[i][1] + s_dy[k];
-                    if (nx >= 0 && ny >= 0 && nx < N && ny < N && in[ny][nx]) continue;
+                    if (s_in(nx, ny) && in[ny][nx]) continue;
                     per++;
                     if (!s_op(l, nx, ny) || (s_grey(l, nx, ny) && s_g(l, nx, ny) >= 150)) out++;
                 }
@@ -87,26 +95,20 @@ int card_shadow(const u8 *l, u8 *hd)
             memset(flat, 0, sizeof flat);
             for (int i = 0; i < nc; i++)
                 if (abs(s_g(l, cell[i][0], cell[i][1]) - med) <= 20) flat[cell[i][1]][cell[i][0]] = 1;
-            for (int y = 0; y + 1 < N; y++)
-                for (int x = 0; x + 1 < N; x++)
-                    if (flat[y][x] && flat[y][x + 1] && flat[y + 1][x] && flat[y + 1][x + 1]) {
-                        m[y][x] = m[y][x + 1] = m[y + 1][x] = m[y + 1][x + 1] = 1;
-                        found = 1;
-                    }
+            s_open((const u8 (*)[N])flat, m);
         }
-    if (!found) return 0;
 
     for (int pass = 0; pass < 3; pass++) {                   /* fill the gaps: mottled horse shadows lose cells above */
         u8 add[N][N];
         memset(add, 0, sizeof add);
-        for (int y = N * 31 / 50; y < N; y++)
+        for (int y = TOP; y < N; y++)
             for (int x = 0; x < N; x++) {
-                if (m[y][x] || !s_grey(l, x, y) || s_g(l, x, y) < 60 || s_g(l, x, y) > 175) continue;
+                if (m[y][x] || !d[y][x]) continue;
                 int near = 0;
                 for (int dy = -1; dy <= 1; dy++)
                     for (int dx = -1; dx <= 1; dx++) {
                         int nx = x + dx, ny = y + dy;
-                        if (nx >= 0 && ny >= 0 && nx < N && ny < N && m[ny][nx]) near++;
+                        if (s_in(nx, ny) && m[ny][nx]) near++;
                     }
                 add[y][x] = near >= 4;
             }
@@ -124,11 +126,12 @@ int card_shadow(const u8 *l, u8 *hd)
             for (int dy = -1; dy <= 1; dy++)                 /* fringe */
                 for (int dx = -1; dx <= 1; dx++) {
                     int nx = x + dx, ny = y + dy;
-                    if (nx < 0 || ny < 0 || nx >= N || ny >= N || m[ny][nx] || !s_grey(l, nx, ny) || s_g(l, nx, ny) < 140) continue;
+                    if (!s_in(nx, ny) || m[ny][nx] || !s_grey(l, nx, ny) || s_g(l, nx, ny) < 140) continue;
                     for (int k = 0; k < 4; k++)      /* between the blob and the transparency, not armour */
                         if (!s_op(l, nx + s_dx[k], ny + s_dy[k])) r[ny][nx] = 1;
                 }
         }
+    if (!cnt) return;
     for (int i = 0; i < 3; i++) s[i] /= (float)cnt;
 
     float g[N][N], t[N][N];
@@ -140,7 +143,7 @@ int card_shadow(const u8 *l, u8 *hd)
                 for (int dy = -1; dy <= 1; dy++)
                     for (int dx = -1; dx <= 1; dx++) {
                         int nx = x + dx, ny = y + dy;
-                        if (nx >= 0 && ny >= 0 && nx < N && ny < N)
+                        if (s_in(nx, ny))
                             sum += g[ny][nx] * (float)((2 - abs(dx)) * (2 - abs(dy)));
                     }
                 t[y][x] = sum / 16;
@@ -166,5 +169,4 @@ int card_shadow(const u8 *l, u8 *hd)
             q[2] = (u8)(K[0] + (s[0] - K[0]) * a);
             q[3] = 255;
         }
-    return 1;
 }

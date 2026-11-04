@@ -13,9 +13,9 @@ import glob, os, re, struct, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 GAME = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, HERE)
-from build_icons import sprite_hash, OUT, PENDING
+from build_icons import sprite_hash, OUT, PENDING, PARCHMENT
 
-BG = (207, 207, 199)
+BG = PARCHMENT[:3]
 # the exe's table at 0x799F7C, replaced entry by entry by SetFactionCol in the campaign start files
 DEFAULTS = ['f0f0f0caceb0', 'ff8a00202020', 'a301f5ffffff', 'ffffffff0000', 'ecb826feffff', 'ff0000ff0000',
             '2402d3ffe400', '010101ffe400', '006f15ffe400', '960000ffffff', '4f8ed2ffe400', 'ffe400ffe400',
@@ -33,7 +33,7 @@ def faction_colours():
     return sorted(pairs)
 
 
-def rgb565(r, g, b): return (r >> 3) << 11 | (g >> 2) << 5 | b >> 3
+def to565(r, g, b): return (r >> 3) << 11 | (g >> 2) << 5 | b >> 3
 
 
 def recoloured_palette(pal, colours):
@@ -42,22 +42,23 @@ def recoloured_palette(pal, colours):
     c0, c1 = bytes.fromhex(colours[:6]), bytes.fromhex(colours[6:])
     for light, dark, c in ((208, 224, c1), (216, 240, c0)):
         for i in range(8):
-            e[light + i] = rgb565(*[(BG[n] * (8 - i) + c[n] * i) // 8 for n in range(3)])
+            e[light + i] = to565(*[(BG[n] * (8 - i) + c[n] * i) // 8 for n in range(3)])
         for i in range(16):
-            e[dark + i] = rgb565(*[c[n] * i // 16 for n in range(3)])
+            e[dark + i] = to565(*[c[n] * i // 16 for n in range(3)])
     return struct.pack('<256H', *e)
 
 
 def main():
     os.makedirs(PENDING, exist_ok=True)
     pairs = faction_colours()
+    done = {f.split('_')[0] for f in os.listdir(OUT) if f.endswith('.png')}
     queued = 0
     for f in glob.glob(os.path.join(GAME, 'campmap', 'review_panel', 'Units', '*.[bB][iI][fF]')):
         d = open(f, 'rb').read()
         for colours in pairs:
             s = recoloured_palette(d[:0x200], colours) + d[0x200:]
             h = '%08x' % sprite_hash(s)
-            if not glob.glob(os.path.join(OUT, h + '_*.png')):
+            if h not in done:
                 open(os.path.join(PENDING, h + '.bif'), 'wb').write(s)
                 queued += 1
     print('%d colour pairs, %d cards queued' % (len(pairs), queued))

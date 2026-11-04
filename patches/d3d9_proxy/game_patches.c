@@ -297,10 +297,8 @@ void patch_card_icon(void)
         plog("cardicon: unexpected exe layout, not applied");
         return;
     }
-    BYTE code[5] = { 0xE8 };
-    DWORD rel = (DWORD)card_thunk - (CARD_ICON_CALL + 5);
-    memcpy(code + 1, &rel, 4);
-    if (patch_mem(site, code, sizeof code)) plog("cardicon: hooked");
+    int rel = (int)((DWORD)card_thunk - (CARD_ICON_CALL + 5));
+    if (patch_mem(site + 1, &rel, 4)) plog("cardicon: hooked");
 }
 
 void patch_resolution(void)

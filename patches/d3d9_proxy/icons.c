@@ -53,14 +53,12 @@ static DWORD sprite_hash(const BYTE *spr)
 #define TARGET_H   (*(int *)0x8D01B8)
 #define BUF_MAX    16
 #define BUF_RECS   128
-typedef struct { BYTE *spr; DWORD hash; int x, y, frame, cw, ch, w, h; } BufRec;
-typedef struct { BYTE *base; int n, next; BufRec r[BUF_RECS]; } SprBuf;
+typedef struct { BYTE *base; int n, next; IcDraw r[BUF_RECS]; } SprBuf;
 static SprBuf g_bufs[BUF_MAX];
 static int g_bufNext;
 
-static void buf_add(BYTE *spr, DWORD hash, int x, int y, int frame, int cw, int ch, int w, int h)
+static void buf_add(const IcDraw *d)
 {
-    if (!cw || !ch) return;                              /* cards are blitted again with a 0x0 clip: nothing drawn */
     BYTE *base = TARGET;
     SprBuf *b = NULL;
     for (int i = 0; i < BUF_MAX && !b; i++) if (g_bufs[i].base == base) b = &g_bufs[i];
@@ -69,16 +67,17 @@ static void buf_add(BYTE *spr, DWORD hash, int x, int y, int frame, int cw, int 
         g_bufNext = (g_bufNext + 1) % BUF_MAX;
         b->base = base; b->n = b->next = 0;
     }
-    BufRec *r = NULL;
-    for (int i = 0; i < b->n && !r; i++)                 /* a redraw replaces what was at that spot */
-        if (b->r[i].x == x && b->r[i].y == y && b->r[i].frame == frame && b->r[i].cw == cw && b->r[i].ch == ch)
-            r = &b->r[i];
+    IcDraw *r = NULL;
+    for (int i = 0; i < b->n && !r; i++) {               /* a redraw replaces what was at that spot */
+        const IcDraw *o = &b->r[i];
+        if (o->x == d->x && o->y == d->y && o->frame == d->frame && o->cw == d->cw && o->ch == d->ch) r = &b->r[i];
+    }
     if (!r) {
         r = &b->r[b->next];
         b->next = (b->next + 1) % BUF_RECS;
         if (b->n < BUF_RECS) b->n++;
     }
-    *r = (BufRec){ spr, hash, x, y, frame, cw, ch, w, h };
+    *r = *d;
 }
 
 static void __cdecl hk_copy(BYTE *src, int srcPitch, BYTE *dst, int dstPitch, int w, int h)
@@ -95,16 +94,16 @@ static void __cdecl hk_copy(BYTE *src, int srcPitch, BYTE *dst, int dstPitch, in
     int srcOff = (int)(src - b->base), sx = srcOff % srcPitch / 2, sy = srcOff / srcPitch;
     int dx = dstOff % dstPitch / 2, dy = dstOff / dstPitch;
     for (int i = 0; i < b->n && g_icN < IC_MAX; i++) {
-        BufRec *r = &b->r[i];
+        IcDraw *r = &b->r[i];
         int x = r->x - sx, y = r->y - sy;
         if (x < 0 || y < 0 || x >= w || y >= h) continue;
         int cw = r->cw < 0 || r->cw > r->w ? r->w : r->cw, ch = r->ch < 0 || r->ch > r->h ? r->h : r->ch;
         if (cw > w - x) cw = w - x;
         if (ch > h - y) ch = h - y;
         IcDraw *d = &g_icDraws[g_icN++];
-        d->spr = r->spr; d->hash = r->hash; d->last = 0;     /* spr: used once to load, it may go away later */
-        r->spr = NULL;
-        d->x = dx + x; d->y = dy + y; d->frame = r->frame; d->cw = cw; d->ch = ch; d->w = r->w; d->h = r->h;
+        *d = *r;
+        r->spr = NULL;                                       /* used once to load: it may go away later */
+        d->x = dx + x; d->y = dy + y; d->cw = cw; d->ch = ch;
     }
 }
 
@@ -114,15 +113,9 @@ static int __cdecl hk_blit(BYTE *spr, int x, int y, int frame, int cw, int ch)
     if (g_hdIcons && spr && g_icN < IC_MAX) {
         UINT w = *(UINT *)(spr + 0x200), h = *(UINT *)(spr + 0x204), n = *(UINT *)(spr + 0x20C) * *(UINT *)(spr + 0x210);
         if (w && h && w <= 2048 && h <= 2048 && n && n <= 4096) {
-            int f = frame < 0 ? 0 : (int)((UINT)frame % n);
-            if (TARGET_W != g_bbW || TARGET_H != g_bbH) {
-                buf_add(spr, sprite_hash(spr), x, y, f, cw, ch, (int)w, (int)h);
-            } else {
-                IcDraw *d = &g_icDraws[g_icN++];
-                d->spr = spr; d->hash = sprite_hash(spr); d->last = 0;
-                d->x = x; d->y = y; d->frame = f; d->cw = cw; d->ch = ch;
-                d->w = (int)w; d->h = (int)h;
-            }
+            IcDraw d = { spr, sprite_hash(spr), 0, x, y, frame < 0 ? 0 : (int)((UINT)frame % n), cw, ch, (int)w, (int)h };
+            if (TARGET_W == g_bbW && TARGET_H == g_bbH) g_icDraws[g_icN++] = d;
+            else if (cw && ch) buf_add(&d);              /* cards are blitted again with a 0x0 clip: nothing drawn */
         }
     }
     if (g_icLog && spr && g_icLines < 20000) {

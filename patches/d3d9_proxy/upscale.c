@@ -151,7 +151,7 @@ static int lg_load(IDirect3DDevice9 *dev)
     return g_lgState > 0;
 }
 
-/* second pass, inside the upscaler's scene: the high-res logo over the sprite's area */
+/* last pass, inside the upscaler's scene: the high-res logo over the sprite's area */
 static void lg_draw(IDirect3DDevice9 *dev, const D3DSURFACE_DESC *bd, int dw, int dh)
 {
     if (bd->Width != 800 || bd->Height != 600 || !g_usPs[0] || !lg_load(dev)) return;
@@ -165,7 +165,9 @@ static void lg_draw(IDirect3DDevice9 *dev, const D3DSURFACE_DESC *bd, int dw, in
     };
     IDirect3DDevice9_SetPixelShader(dev, g_usPs[0]);
     IDirect3DDevice9_SetPixelShaderConstantF(dev, 2, g_lgRect, 1);
+    static const float noKey[4] = { 0, 0, 0, 0 };             /* sd_draw and hd_draw use c4 too */
     IDirect3DDevice9_SetPixelShaderConstantF(dev, 3, g_lgTone, 1);
+    IDirect3DDevice9_SetPixelShaderConstantF(dev, 4, noKey, 1);
     IDirect3DDevice9_SetTexture(dev, 1, (IDirect3DBaseTexture9 *)g_lgSpr);
     IDirect3DDevice9_SetTexture(dev, 2, (IDirect3DBaseTexture9 *)g_lgHd);
     IDirect3DDevice9_SetSamplerState(dev, 0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
@@ -191,8 +193,8 @@ static void lg_draw(IDirect3DDevice9 *dev, const D3DSURFACE_DESC *bd, int dw, in
 
 /* ------------------------------------------------------------------ HD sprites (HDIcons=1)
  * Every sprite blit of the frame is recorded by icons.c. For each one with an HD copy
- * (hd_icons/<hash>_<frame>.png, patches/hd_icons/build_icons.py; <hash> = FNV-1a of the sprite's first
- * 0x214 bytes) the HD image is drawn over the blit's rectangle with the logo shader: only where the frame
+ * (hd_icons/<hash>_<frame>.png, patches/hd_icons/build_icons.py; <hash> = sprite_hash in icons.c)
+ * the HD image is drawn over the blit's rectangle with the logo shader: only where the frame
  * still shows the low-res sprite, so whatever the game drew on top (text, highlights, cursor) is kept.
  * PNGs are decoded with WIC on first use; textures are cached (managed pool), missing files remembered.
  */
@@ -337,8 +339,9 @@ static HdEnt *hd_get(IDirect3DDevice9 *dev, const BYTE *spr, DWORD hash, int fra
     UINT w, h;
     BYTE *px = hd_png(path, &w, &h);
     if (px) {
-        e->keyed = w == 200 && h == 200 && px[3] == 255;      /* unit card flattened by build_icons.py */
-        if (e->keyed && !frame && *(const UINT *)(spr + 0x200) == 50 && *(const UINT *)(spr + 0x204) == 50) {
+        /* cards are flattened on the parchment by build_icons.py */
+        e->keyed = *(const UINT *)(spr + 0x200) == 50 && *(const UINT *)(spr + 0x204) == 50;
+        if (e->keyed && !frame) {
             BYTE *low = hd_decode(spr, frame);
             if (low) { card_shadow(low, px); free(low); }
         }
@@ -374,7 +377,7 @@ IDirect3DTexture9 *hd_card(IDirect3DDevice9 *dev, const char *name, const char *
     char path[MAX_PATH];
     snprintf(path, sizeof path, "%shd_icons/battle/%s_%s.png", g_dir, name, colours);
     UINT w, h;
-    BYTE *px = GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES ? NULL : hd_png(path, &w, &h);
+    BYTE *px = hd_png(path, &w, &h);
     if (px) {
         g_hdCard[e].tex = lg_texture(dev, w, h, px, 1);
         free(px);
@@ -428,7 +431,7 @@ static void hd_merge(IDirect3DDevice9 *dev, const D3DSURFACE_DESC *bd)
     g_keepN = n;
 }
 
-/* third pass, inside the upscaler's scene, after the logo */
+/* second pass, inside the upscaler's scene. The logo comes after it: its soft edges must cover the HD parchment */
 static void hd_draw(IDirect3DDevice9 *dev, const D3DSURFACE_DESC *bd, int dw, int dh)
 {
     if (!g_hdIcons || !g_usPs[0]) return;
@@ -479,8 +482,6 @@ static void hd_draw(IDirect3DDevice9 *dev, const D3DSURFACE_DESC *bd, int dw, in
         IDirect3DDevice9_DrawPrimitiveUP(dev, D3DPT_TRIANGLESTRIP, 2, q, sizeof q[0]);
     }
     if (ready) {
-        static const float noKey[4] = { 0, 0, 0, 0 };
-        IDirect3DDevice9_SetPixelShaderConstantF(dev, 4, noKey, 1);
         IDirect3DDevice9_SetTexture(dev, 1, NULL);
         IDirect3DDevice9_SetTexture(dev, 2, NULL);
     }
@@ -658,28 +659,33 @@ fail:
 
 static int g_dumpFinal;
 
-static void dump_surface(IDirect3DDevice9 *dev, IDirect3DSurface9 *s, const D3DSURFACE_DESC *bd, const char *path)
+/* raw dump: u32 w, h, format, bytes/pixel, then the rows. Returns 1 if written. */
+static int dump_surface(IDirect3DDevice9 *dev, IDirect3DSurface9 *s, const D3DSURFACE_DESC *bd, const char *path)
 {
+    UINT bpp = bd->Format == D3DFMT_R5G6B5 ? 2 : 4;
     IDirect3DSurface9 *sys = NULL;
     D3DLOCKED_RECT lr;
+    int done = 0;
     if (FAILED(IDirect3DDevice9_CreateOffscreenPlainSurface(dev, bd->Width, bd->Height, bd->Format, D3DPOOL_SYSTEMMEM,
-                                                            &sys, NULL))) return;
+                                                            &sys, NULL))) return 0;
     if (SUCCEEDED(IDirect3DDevice9_GetRenderTargetData(dev, s, sys)) &&
         SUCCEEDED(IDirect3DSurface9_LockRect(sys, &lr, NULL, D3DLOCK_READONLY))) {
         FILE *f = fopen(path, "wb");
         if (f) {
-            UINT wh[4] = { bd->Width, bd->Height, (UINT)bd->Format, 4 };
+            UINT wh[4] = { bd->Width, bd->Height, (UINT)bd->Format, bpp };
             fwrite(wh, 4, 4, f);
-            for (UINT y = 0; y < bd->Height; y++) fwrite((BYTE *)lr.pBits + y * lr.Pitch, 4, bd->Width, f);
+            for (UINT y = 0; y < bd->Height; y++) fwrite((BYTE *)lr.pBits + y * lr.Pitch, bpp, bd->Width, f);
             fclose(f);
+            done = 1;
         }
         IDirect3DSurface9_UnlockRect(sys);
     }
     IDirect3DSurface9_Release(sys);
+    return done;
 }
 
-/* debug (DumpFrame=1): F11 writes the back buffer to frame_<n>.raw (u32 w, h, format, bytes/pixel, rows) and the
- * HD placements to frame_<n>.txt */
+/* debug (DumpFrame=1): F11 writes the back buffer to frame_<n>.raw, the HD placements to frame_<n>.txt and,
+ * after the HD pass, the displayed image to final_<n>.raw */
 static void us_dump(IDirect3DDevice9 *dev, IDirect3DSurface9 *bb, const D3DSURFACE_DESC *bd)
 {
     static int n, held;
@@ -687,39 +693,20 @@ static void us_dump(IDirect3DDevice9 *dev, IDirect3DSurface9 *bb, const D3DSURFA
     if (!down) held = 0;
     if (!down || held) return;
     held = 1;
-    n++;
-    g_dumpFinal = n;
-    UINT bpp = bd->Format == D3DFMT_R5G6B5 ? 2 : 4;
-    plog("dump: %ux%u format %d", bd->Width, bd->Height, (int)bd->Format);
-    IDirect3DSurface9 *sys = NULL;
-    D3DLOCKED_RECT lr;
-    if (FAILED(IDirect3DDevice9_CreateOffscreenPlainSurface(dev, bd->Width, bd->Height, bd->Format, D3DPOOL_SYSTEMMEM,
-                                                            &sys, NULL))) { plog("dump: no surface"); return; }
-    if (SUCCEEDED(IDirect3DDevice9_GetRenderTargetData(dev, bb, sys)) &&
-        SUCCEEDED(IDirect3DSurface9_LockRect(sys, &lr, NULL, D3DLOCK_READONLY))) {
-        char path[MAX_PATH];
-        snprintf(path, sizeof path, "%sframe_%d.txt", g_dir, n);
-        FILE *p = fopen(path, "w");
-        if (p) {
-            fprintf(p, "# hash x y w h cw ch frame hd\n");
-            for (int k = 0; k < g_keepN; k++) {
-                const IcDraw *d = &g_keep[k];
-                fprintf(p, "%08lx %d %d %d %d %d %d %d %d\n", (unsigned long)d->hash, d->x, d->y, d->w, d->h, d->cw, d->ch,
-                        d->frame, hd_get(dev, NULL, d->hash, d->frame) != NULL);
-            }
-            fclose(p);
-        }
-        snprintf(path, sizeof path, "%sframe_%d.raw", g_dir, n);
-        FILE *f = fopen(path, "wb");
-        if (f) {
-            UINT wh[4] = { bd->Width, bd->Height, (UINT)bd->Format, bpp };
-            fwrite(wh, 4, 4, f);
-            for (UINT y = 0; y < bd->Height; y++) fwrite((BYTE *)lr.pBits + y * lr.Pitch, bpp, bd->Width, f);
-            fclose(f);
-        }
-        IDirect3DSurface9_UnlockRect(sys);
+    g_dumpFinal = ++n;
+    char path[MAX_PATH];
+    snprintf(path, sizeof path, "%sframe_%d.raw", g_dir, n);
+    if (!dump_surface(dev, bb, bd, path)) return;
+    snprintf(path, sizeof path, "%sframe_%d.txt", g_dir, n);
+    FILE *p = fopen(path, "w");
+    if (!p) return;
+    fprintf(p, "# hash x y w h cw ch frame hd\n");
+    for (int k = 0; k < g_keepN; k++) {
+        const IcDraw *d = &g_keep[k];
+        fprintf(p, "%08lx %d %d %d %d %d %d %d %d\n", (unsigned long)d->hash, d->x, d->y, d->w, d->h, d->cw, d->ch,
+                d->frame, hd_get(dev, NULL, d->hash, d->frame) != NULL);
     }
-    IDirect3DSurface9_Release(sys);
+    fclose(p);
 }
 
 /* returns 1 if it presented the frame */

@@ -24,8 +24,8 @@ UPSCAYL = r'C:\Program Files\Upscayl\resources'
 OUT = os.path.join(GAME, 'hd_icons')
 PENDING = os.path.join(OUT, '_pending')
 SKIP_DIRS = {os.path.join('campmap', 'pieces').lower()}
-SKIP_LOGO = {'be4aaeed'}            # menu logo: has its own HD version (patches/logo, MTW_LOGO_HD.raw)
-CARD = (50, 50)                     # unit cards: flattened on the parchment, the proxy keys it out
+SKIP_HASHES = {'5d647033'}          # menu logo: has its own HD version (patches/logo, MTW_LOGO_HD.raw)
+CARD = (50, 50)                     # card-sized sprites: flattened on the parchment, the proxy keys it out
 PARCHMENT = (207, 207, 199, 255)    # (a transparent upscale leaves a fringe around thin figures)
 BIG = 200                           # sprites this size or more: 2x, else 4x
 THIN = 16                           # sprites thinner than this are skipped
@@ -65,6 +65,12 @@ def bleed(px, w, h):
         for y, x, p in new: px[y][x] = p; known[y][x] = True
         todo = [(y, x) for y, x in todo if not known[y][x]]
 
+def upscale(src, scale, out):
+    """Upscale a folder of PNGs. One thread per stage: batch mode with parallel threads garbles some outputs."""
+    subprocess.run([os.path.join(UPSCAYL, 'bin', 'upscayl-bin.exe'), '-i', src, '-o', out,
+                    '-m', os.path.join(UPSCAYL, 'models'), '-n', 'ultrasharp-4x', '-s', str(scale), '-f', 'png',
+                    '-j', '1:1:1'], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
 def write_png(path, w, h, px):
     raw = b''.join(b'\0' + bytes(v for p in r for v in p) for r in px)
     ch = lambda t, b: struct.pack('>I', len(b)) + t + b + struct.pack('>I', zlib.crc32(t + b))
@@ -89,7 +95,7 @@ def main(folders):
         with open(path, 'rb') as fh: data = fh.read()
         hsh = '%08x' % sprite_hash(data)
         if pending: done_pending.append(path)        # processed or skipped: either way, done
-        if '%08x' % fnv(data[:0x214]) in SKIP_LOGO: continue
+        if hsh in SKIP_HASHES: continue
         try: b = bif.read(path)
         except Exception as e: print('skip', path, e); continue
         if min(b['w'], b['h']) < THIN: continue         # dividers and borders: nothing to gain, and Upscayl hangs on them
@@ -105,11 +111,7 @@ def main(folders):
             n[scale] += 1
     print('frames to upscale: %d at 4x, %d at 2x' % (n[4], n[2]))
     for s in (4, 2):
-        if n[s]:
-            subprocess.run([os.path.join(UPSCAYL, 'bin', 'upscayl-bin.exe'), '-i', tmp[s], '-o', OUT,
-                            '-m', os.path.join(UPSCAYL, 'models'), '-n', 'ultrasharp-4x', '-s', str(s), '-f', 'png',
-                            '-j', '1:1:1'],                 # batch mode with parallel threads garbles some outputs
-                           check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if n[s]: upscale(tmp[s], s, OUT)
         for f in os.listdir(tmp[s]): os.remove(os.path.join(tmp[s], f))
         os.rmdir(tmp[s])
     for p in done_pending: os.remove(p)

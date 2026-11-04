@@ -9,14 +9,14 @@ the on-screen size up to 4K) and written to hd_icons/battle/<name>_<rrggbbrrggbb
 
 Incremental: existing outputs are skipped. The PNGs are derived from the game's art: never commit them.
 """
-import glob, os, shutil, struct, subprocess, sys, tempfile, zlib
+import glob, os, struct, sys, tempfile, zlib
 HERE = os.path.dirname(os.path.abspath(__file__))
 GAME = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, HERE)
+import build_icons
 from faction_cards import BG, faction_colours
 
-UPSCAYL = r'C:\Program Files\Upscayl\resources'
-OUT = os.path.join(GAME, 'hd_icons', 'battle')
+OUT = os.path.join(build_icons.OUT, 'battle')
 
 
 def load_lbm(path):
@@ -78,10 +78,7 @@ def main():
                 write_png(os.path.join(tmp, out), w, h, rgb)
                 todo += 1
         print(todo, 'icons to upscale', flush=True)
-        if todo:
-            subprocess.run([os.path.join(UPSCAYL, 'bin', 'upscayl-bin.exe'), '-i', tmp, '-o', OUT,
-                            '-m', os.path.join(UPSCAYL, 'models'), '-n', 'ultrasharp-4x', '-s', '3', '-f', 'png',
-                            '-j', '1:1:1'], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if todo: build_icons.upscale(tmp, 3, OUT)
     print(len(glob.glob(os.path.join(OUT, '*.png'))), 'files in', OUT)
 
 
