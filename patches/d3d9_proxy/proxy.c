@@ -41,6 +41,7 @@
  *   Upscale=2        ; borderless: upscale low-res screens (menus) with a shader: 0 = plain stretch,
  *                    ;   1 = sharp, 2 = smooth
  *   FastDraw=1       ; 1 = replay DrawIndexedPrimitiveUP through our own dynamic buffers (faster)
+ *   CardIcons=1      ; 1 = bigger soldier icon on the battle unit cards
  *   BatchUI=1        ; 1 = draw the battle UI panels' 2D parts under one back-buffer lock (faster)
  *   Profile=1        ; 1 = write profile.log: per-second breakdown of frame time (on by default,
  *                    ;     new file past 4 MB; 0 = off)
@@ -61,6 +62,8 @@ static PFN_GetCursorPos g_realGetCursorPos;
 static PFN_SetCursorPos g_realSetCursorPos;
 static PFN_ClipCursor g_realClipCursor;
 
+int g_cardIcons = 1;
+IDirect3DDevice9 *g_dev9;
 int g_borderless = 1, g_keepAspect = 1, g_log = 0, g_showFps = 0, g_fpsLimit = 0, g_profile = 1, g_batchUI = 1, g_fastDraw = 1, g_upscale = 2, g_dumpFrame = 0, g_menuSides = 1, g_iconLog = 0, g_hdIcons = 0;
 int g_campW, g_campH, g_batW, g_batH;   /* resolution overrides from the ini, 0 = off */
 HWND g_hwnd;
@@ -100,6 +103,7 @@ static void load_config(void)
     g_fpsLimit = GetPrivateProfileIntA("Display", "FPSLimit", 0, ini);
     g_profile = GetPrivateProfileIntA("Display", "Profile", 1, ini);
     g_batchUI = GetPrivateProfileIntA("Display", "BatchUI", 1, ini);
+    g_cardIcons = GetPrivateProfileIntA("Display", "CardIcons", 1, ini);
     g_fastDraw = GetPrivateProfileIntA("Display", "FastDraw", 1, ini);
     g_upscale = GetPrivateProfileIntA("Display", "Upscale", 2, ini);
     g_dumpFrame = GetPrivateProfileIntA("Display", "DumpFrame", 0, ini);
@@ -353,6 +357,7 @@ static HRESULT STDMETHODCALLTYPE hk_CreateDevice(IDirect3D9 *d3d, UINT adapter, 
             patch_ptr(&vt[17], (void *)hk_Present);
         }
         if (SUCCEEDED(hr0) && *out) {
+            g_dev9 = *out;
             fd_install(*out);
             prof_install(*out);
         }
@@ -378,6 +383,7 @@ static HRESULT STDMETHODCALLTYPE hk_CreateDevice(IDirect3D9 *d3d, UINT adapter, 
             patch_ptr(&vt[16], (void *)hk_Reset);
             patch_ptr(&vt[17], (void *)hk_Present);
         }
+        g_dev9 = *out;
         fd_install(*out);
         prof_install(*out);
         install_hooks();
@@ -422,6 +428,7 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID r)
         patch_video_menu();
         patch_resolution();
         if (g_batchUI) patch_ui_batch();
+        if (g_cardIcons) patch_card_icon();
         if (g_iconLog || g_hdIcons) patch_icons();
     }
     return TRUE;

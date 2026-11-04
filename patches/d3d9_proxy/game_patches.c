@@ -219,6 +219,85 @@ void patch_ui_batch(void)
 }
 
 
+/* ------------------------------------------------------------------ battle unit-card icon (report §14)
+ * The card (0x4CC830) sizes its soldier icon from two units: s = width/640*33 and h = height/480*72.
+ * The box's top is card top + s, a width-based offset on a height-based card, so on widescreen most of
+ * the box's height is gone (1440p: 94x48 px on a 132x216 card). The fit helper 0x4CC210 has this one
+ * caller: we replace the box with the free space between the number row and the bottom row. */
+#define CARD_ICON_CALL 0x4CC93C
+#define CARD_ICON_FIT  0x4CC210
+#define CARD_UNIT_S    (*(float *)0xB429C4)
+#define CARD_UNIT_H    (*(float *)0xB429C8)
+
+typedef void (__cdecl *card_fit_fn)(int, int, int, int, float, float, float, float, DWORD);
+typedef HRESULT (__stdcall *card_draw_fn)(void *, int, DWORD, void *, DWORD, DWORD);
+
+#define CARD_ICON_IDS  ((int *)0x7B9354)     /* unit ids in the atlas, -1 terminated, 17 slots */
+#define CARD_VERTS     ((BYTE *)0x7B6240)    /* the game's quad: 4 vertices of 0x20 bytes, FVF 0x1C4 */
+
+BYTE *g_cardPtr;                             /* card being drawn: esi at the hooked call */
+
+/* Same draw as 0x4CC0A0, with the unit's HD picture bound in place of the atlas. 0 = no HD picture. */
+static int card_icon_hd(float x, float y, float size, DWORD color)
+{
+    int i = *(int *)(g_cardPtr + 0x2C);
+    if (!g_dev9 || !g_hdIcons || i < 0 || i >= 17 || CARD_ICON_IDS[i] == -1) return 0;
+    BYTE *info = ((BYTE *(__cdecl *)(int))0x72B2A0)(CARD_ICON_IDS[i]);
+    BYTE *player = *(BYTE **)0xB4275C;       /* faction colours: as the icon loader's callback 0x4DA5B0 */
+    int colours = player ? *(*(BYTE **)(player + 0x374) + 4) : 0;
+    IDirect3DTexture9 *tex = hd_card(g_dev9, *(const char **)(info + 0x78), colours);
+    if (!tex) return 0;
+
+    BYTE v[0x80];
+    memcpy(v, CARD_VERTS, sizeof v);
+    for (int k = 0; k < 4; k++) {
+        float *f = (float *)(v + k * 0x20);
+        f[0] = x + (k & 1) * size;
+        f[1] = y + (k >> 1) * size;
+        *(DWORD *)(f + 5) = color | 0xFF000000;
+        f[6] = (float)(k & 1);
+        f[7] = (float)(k >> 1);
+    }
+    ((void (__cdecl *)(void))0x467B10)();    /* the game's "scene is open" check, as in 0x4CC0A0 */
+    IDirect3DBaseTexture9 *old = NULL;
+    IDirect3DDevice9_GetTexture(g_dev9, 0, &old);
+    IDirect3DDevice9_SetTexture(g_dev9, 0, (IDirect3DBaseTexture9 *)tex);
+    void *gd = *(void **)0x8DCCF8;
+    card_draw_fn draw = (*(card_draw_fn **)gd)[0x70 / 4];
+    draw(gd, 5, 0x1C4, v, 4, 0);
+    IDirect3DDevice9_SetTexture(g_dev9, 0, old);
+    if (old) IDirect3DBaseTexture9_Release(old);
+    return 1;
+}
+
+void __cdecl card_icon(int u, int v, int tw, int th, float x, float y, float bw, float bh, DWORD color)
+{
+    float s = CARD_UNIT_S, h = CARD_UNIT_H, e = s * 0.25f;
+    float left = x + bw * 0.5f - (s + e) * 0.5f;          /* undo the game's box: card left edge */
+    float bottom = y + bh * 0.5f + (h - s - e) * 0.5f;    /* top of the bottom row */
+    float size = h - e - s * 0.625f;                      /* below the number row (card top + s/2 + text) */
+    if (size > s * 0.95f) size = s * 0.95f;
+    float ix = left + (s - size) * 0.5f, iy = bottom - size;
+    if (!card_icon_hd(ix, iy, size, color))
+        ((card_fit_fn)CARD_ICON_FIT)(u, v, tw, th, ix, iy, size, size, color);
+}
+
+void card_thunk(void);
+__asm__(".globl _card_thunk\n_card_thunk:\n  movl %esi, _g_cardPtr\n  jmp _card_icon\n");
+
+void patch_card_icon(void)
+{
+    BYTE *site = (BYTE *)CARD_ICON_CALL;
+    if (site[0] != 0xE8 || (DWORD)(site + 5) + *(int *)(site + 1) != CARD_ICON_FIT) {
+        plog("cardicon: unexpected exe layout, not applied");
+        return;
+    }
+    BYTE code[5] = { 0xE8 };
+    DWORD rel = (DWORD)card_thunk - (CARD_ICON_CALL + 5);
+    memcpy(code + 1, &rel, 4);
+    if (patch_mem(site, code, sizeof code)) plog("cardicon: hooked");
+}
+
 void patch_resolution(void)
 {
     static const BYTE orig[6] = { 0x8B, 0x15, 0x04, 0x7B, 0xE7, 0x00 };

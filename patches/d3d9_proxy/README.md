@@ -34,6 +34,7 @@ Borderless=1   ; 1 = borderless fullscreen, 0 = original exclusive fullscreen (a
 KeepAspect=1   ; 1 = keep the game's aspect ratio (black bars), 0 = stretch to the whole screen
 ShowFPS=0      ; 1 = framerate counter at the top right (both display modes)
 FPSLimit=0     ; frame rate cap, e.g. 60 (0 = off; both display modes)
+CardIcons=1    ; 1 = bigger soldier icon on the battle unit cards (report §14)
 BatchUI=1      ; 1 = battle UI panels: one back-buffer lock per panel group (report §11)
 Upscale=2      ; borderless: upscale low-res screens (the 800x600 menus) with a shader: 0 = plain stretch, 1 = sharp, 2 = smooth (default)
 MenuSides=1    ; with Upscale: fill the bars beside the 4:3 menus with the game's wood texture (textures/campmap/Wood2.tga), 0 = black

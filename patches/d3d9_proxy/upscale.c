@@ -329,6 +329,38 @@ static HdEnt *hd_get(IDirect3DDevice9 *dev, const BYTE *spr, DWORD hash, int fra
     return e->state > 0 ? e : NULL;
 }
 
+/* Battle unit-card pictures, hd_icons/battle/<unit>_<colours>.png (build_card_icons.py, report section 14).
+ * At most one army at a time, so a small cache; a miss is remembered as a NULL texture. */
+#define HD_CARDS 32
+static struct { char name[48]; int colours; IDirect3DTexture9 *tex; } g_hdCard[HD_CARDS];
+static int g_hdCardN;
+static IDirect3DDevice9 *g_hdCardDev;
+
+IDirect3DTexture9 *hd_card(IDirect3DDevice9 *dev, const char *name, int colours)
+{
+    if (dev != g_hdCardDev || g_hdCardN == HD_CARDS) {
+        for (int i = 0; i < g_hdCardN; i++) if (g_hdCard[i].tex) IDirect3DTexture9_Release(g_hdCard[i].tex);
+        g_hdCardN = 0;
+        g_hdCardDev = dev;
+    }
+    for (int i = 0; i < g_hdCardN; i++)
+        if (g_hdCard[i].colours == colours && !_stricmp(g_hdCard[i].name, name)) return g_hdCard[i].tex;
+    int e = g_hdCardN++;
+    snprintf(g_hdCard[e].name, sizeof g_hdCard[e].name, "%s", name);
+    g_hdCard[e].colours = colours;
+    g_hdCard[e].tex = NULL;
+    char path[MAX_PATH];
+    snprintf(path, sizeof path, "%shd_icons/battle/%s_%d.png", g_dir, name, colours);
+    UINT w, h;
+    BYTE *px = GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES ? NULL : hd_png(path, &w, &h);
+    if (px) {
+        g_hdCard[e].tex = lg_texture(dev, w, h, px, 1);
+        free(px);
+    }
+    plog("hd card: %s %s", path, g_hdCard[e].tex ? "loaded" : "missing");
+    return g_hdCard[e].tex;
+}
+
 /* Placements kept across frames: the game draws static UI (e.g. the campaign's bottom panel buttons) once and
  * leaves it in the back buffer, so this frame's blits alone would show HD for one frame only. A placement
  * stays until the screen size changes, the list is full (oldest go), or its sprite moved: it was drawn last
