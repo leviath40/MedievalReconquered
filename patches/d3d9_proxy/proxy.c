@@ -392,6 +392,23 @@ static HRESULT STDMETHODCALLTYPE hk_CreateDevice(IDirect3D9 *d3d, UINT adapter, 
     return hr;
 }
 
+/* ------------------------------------------------------------------ Alt+F4 */
+
+/* The game ignores Alt+F4. Polled from its own thread so it also works on loading screens and when the game hangs,
+ * where no window message is processed. Terminates: exit() from here could deadlock against the game thread. */
+static DWORD WINAPI altf4_thread(LPVOID unused)
+{
+    (void)unused;
+    DWORD self = GetCurrentProcessId();
+    for (;;) {
+        Sleep(30);
+        if (!(GetAsyncKeyState(VK_F4) & 0x8000) || !(GetAsyncKeyState(VK_MENU) & 0x8000)) continue;
+        DWORD pid = 0;
+        GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+        if (pid == self) TerminateProcess(GetCurrentProcess(), 0);
+    }
+}
+
 /* ------------------------------------------------------------------ exports */
 
 static void load_real(void)
@@ -431,6 +448,7 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID r)
         if (g_batchUI) patch_ui_batch();
         if (g_cardIcons) patch_card_icon();
         if (g_iconLog || g_hdIcons) patch_icons();
+        CloseHandle(CreateThread(NULL, 0, altf4_thread, NULL, 0, NULL));
     }
     return TRUE;
 }
