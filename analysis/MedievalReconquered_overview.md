@@ -509,3 +509,11 @@ Measured with the proxy's profiler (`Profile=1`, on by default → `profile.log`
 - **Memory**: pictures are managed, so they survive Reset at twice their cost in address space. Past 1400 MB the pictures unused for 600 frames are released and reloaded on demand. Pictures load at first bind, which gives one pause of about 2 s when a battle starts.
 - **Alpha**: a castle page must not lose its alpha between passes: hidden pixels are black, so they would fill the battlements. Hidden pixels are filled with nearby colours before upscaling, and the outline is scaled separately from the original cut-out.
 - **Seams**: tiles fade to the bicubic low-res picture over their last 16 HD pixels. Neighbours match at low res, so they meet on the same colours. No grid was visible in play.
+
+## 16. Middle mouse camera (2026-11-04)
+
+- **Camera state**: five values eased each frame towards five wanted ones, with one speed limit shared by all of them, so a large difference in one slows the others (around 0x4D6020). Current: x `0x799F3C`, y `0x8D676C`, height `0x799F48`, pitch `0x8D6770`, yaw `0x8D6774`. Wanted: `0xB43658`, `0xB4365C`, `0xB43660`, `0xB43664`, `0xB43668`. Angles: 0x4000 = full turn.
+- **Input**: `0x4D5820` turns keys into changes of the wanted values and calls `0x4D5600`, which holds pitch within 0x400 (22.5 degrees) of level. It returns early when nothing changed.
+- **The game's own Mouselook**: a Controls menu option (byte `0xE78168`, read by `0x6F10C0`). Handled in `0x4C0150`, method of the camera controller (vtable `0x78ACA0`): with the right button held it recentres the cursor and passes steps of 2 to `0x4D5820`, so it moves in fixed steps. Not used here.
+- **`camera.c`** (`MouseRotate=1`): while the middle button is held in a battle (`0xB4275C` not null) it reads the cursor at each Present, puts it back, hides the moves from the game in `wndproc`, and sets both wanted and current angles. Setting only the wanted ones left a backlog: the camera kept turning after release, stalled on quick reversals and held back the other values.
+- **Tilt**: limited to 0xF00 (about 84 degrees) from level, in `camera.c` and by patching the limits in `0x4D5600` at startup, otherwise the next key press would pull it back. Play-tested: no problem seen at wide tilt.

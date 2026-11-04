@@ -74,6 +74,9 @@ void patch_ui_batch(void);
 void patch_card_icon(void);
 void hd_install(IDirect3DDevice9 *dev);
 void hd_frame(void);
+void cam_frame(void);
+void patch_tilt_limit(void);
+extern int g_mouseRotate, g_camDrag;
 unsigned char *hd_png(const char *path, unsigned *w, unsigned *h);
 IDirect3DTexture9 *lg_texture(IDirect3DDevice9 *dev, UINT w, UINT h, const unsigned char *bgra, int mips);
 

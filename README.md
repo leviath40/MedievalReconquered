@@ -34,6 +34,8 @@ patch scripts and sources; they are applied to your own install.
 - **New campaign map** painting, AI-upscaled to the game's 4096x3072 (`patches/campmap/`).
 - **HD icons** on the menus and the campaign map: unit cards in every faction colour, building cards, portraits, info pictures,
   shields, buttons and panels are AI-upscaled and drawn at full resolution (`patches/hd_icons/`, `HDIcons=1`).
+- **Rotate the battle camera with the mouse**: hold the middle button and drag to turn and tilt, with a much wider
+  tilt than the keys had (`MouseRotate=1`).
 - **HD battle textures**: ground, skies, trees, buildings and castle walls are AI-upscaled and swapped in by the
   proxy, for every climate and season (`patches/hd_battle/`, `HDTextures=1`). Soldiers are unchanged.
 - **Bigger soldier icons** on the battle unit cards: the widescreen layout bug that squeezed them is fixed and the pictures are AI-upscaled (`CardIcons=1`, `patches/hd_icons/`).
