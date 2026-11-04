@@ -9,6 +9,7 @@
  *   fastdraw.c      DrawIndexedPrimitiveUP through our own dynamic buffers (FastDraw)
  *   upscale.c       shader upscaling of low-res screens, full-resolution menu logo, wood side bars,
  *                   HD sprites (Upscale, MenuSides, HDIcons)
+ *   card_shadow.c   smooth ground shadows on the HD unit cards
  *   game_patches.c  in-memory game code patches: Video menu switch, resolution override, BatchUI
  *   icons.c         sprite blitter hook: per-frame blit list for HDIcons, IconLog (debug)
  *   proxy.h         shared declarations

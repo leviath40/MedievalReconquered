@@ -87,10 +87,10 @@ static const char g_usPsLogo[] =
     "        }\n"
     "    if (opaque < 0.5 || matched < opaque) return float4(0, 0, 0, 0);  /* not the logo here: keep */\n"
     "    float4 h = tex2D(hd, uv);\n"
-    "    if (c4.x > 0.5) {  /* card upscaled on parchment: key the parchment out */\n"
+    "    if (c4.x > 0.5) {  /* card upscaled on parchment: key the parchment out, tight to keep pale details */\n"
     "        float3 k = float3(207, 207, 199) / 255;\n"
     "        float3 e = abs(h.rgb - k);\n"
-    "        float a = saturate((max(e.r, max(e.g, e.b)) - 0.03) / 0.10);\n"
+    "        float a = saturate((max(e.r, max(e.g, e.b)) - 0.025) / 0.05);\n"
     "        h = float4(h.rgb - k * (1 - a), a);\n"
     "    }\n"
     "    float centre = tex2Dlod(spr, float4((ti + 0.5) / c2.zw, 0, 0)).a;\n"
@@ -235,7 +235,7 @@ static BYTE *hd_png(const char *path, UINT *w, UINT *h)
 }
 
 /* the low-res frame as the game draws it: RGB565 expanded by bit replication, A = 0 where transparent */
-static IDirect3DTexture9 *hd_lowres(IDirect3DDevice9 *dev, const BYTE *spr, int frame)
+static BYTE *hd_decode(const BYTE *spr, int frame)
 {
     UINT w = *(const UINT *)(spr + 0x200), h = *(const UINT *)(spr + 0x204);
     UINT n = *(const UINT *)(spr + 0x20C) * *(const UINT *)(spr + 0x210);
@@ -263,7 +263,14 @@ static IDirect3DTexture9 *hd_lowres(IDirect3DDevice9 *dev, const BYTE *spr, int 
         }
         row += *(const WORD *)row;
     }
-    IDirect3DTexture9 *t = lg_texture(dev, w, h, buf, 0);
+    return buf;
+}
+
+static IDirect3DTexture9 *hd_lowres(IDirect3DDevice9 *dev, const BYTE *spr, int frame)
+{
+    BYTE *buf = hd_decode(spr, frame);
+    if (!buf) return NULL;
+    IDirect3DTexture9 *t = lg_texture(dev, *(const UINT *)(spr + 0x200), *(const UINT *)(spr + 0x204), buf, 0);
     free(buf);
     return t;
 }
@@ -330,9 +337,13 @@ static HdEnt *hd_get(IDirect3DDevice9 *dev, const BYTE *spr, DWORD hash, int fra
     UINT w, h;
     BYTE *px = hd_png(path, &w, &h);
     if (px) {
+        e->keyed = w == 200 && h == 200 && px[3] == 255;      /* unit card flattened by build_icons.py */
+        if (e->keyed && !frame && *(const UINT *)(spr + 0x200) == 50 && *(const UINT *)(spr + 0x204) == 50) {
+            BYTE *low = hd_decode(spr, frame);
+            if (low) { card_shadow(low, px); free(low); }
+        }
         e->hd = lg_texture(dev, w, h, px, 1);
         e->lo = hd_lowres(dev, spr, frame);
-        e->keyed = w == 200 && h == 200 && px[3] == 255;      /* unit card flattened by build_icons.py */
         free(px);
     }
     if (e->hd && e->lo) e->state = 1;
