@@ -48,7 +48,7 @@
  *   MenuSides=1      ; with Upscale: fill the bars beside 4:3 screens with the game's wood texture (0 = black)
  *   IconLog=0        ; debug: 1 = log sprite draws to icons.log (icons.c)
  *   HDIcons=0        ; with Upscale: draw HD copies of sprites from hd_icons/ (patches/hd_icons)
- *   DumpFrame=0      ; debug: 1 = save one raw back buffer to frame.raw
+ *   DumpFrame=0      ; debug: 1 = F11 saves frame_<n>.raw/.txt and final_<n>.raw
  *   Log=0            ; 1 = write borderless.log
  */
 #include "proxy.h"

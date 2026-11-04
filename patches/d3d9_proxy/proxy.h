@@ -63,7 +63,7 @@ void fd_release(void);
 
 /* upscale.c */
 int us_present(IDirect3DDevice9 *dev);
-IDirect3DTexture9 *hd_card(IDirect3DDevice9 *dev, const char *name, int colours);
+IDirect3DTexture9 *hd_card(IDirect3DDevice9 *dev, const char *name, const char *colours);
 void us_release(void);
 
 /* game_patches.c */

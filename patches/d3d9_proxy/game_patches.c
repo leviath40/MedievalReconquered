@@ -244,7 +244,9 @@ static int card_icon_hd(float x, float y, float size, DWORD color)
     if (!g_dev9 || !g_hdIcons || i < 0 || i >= 17 || CARD_ICON_IDS[i] == -1) return 0;
     BYTE *info = ((BYTE *(__cdecl *)(int))0x72B2A0)(CARD_ICON_IDS[i]);
     BYTE *player = *(BYTE **)0xB4275C;       /* faction colours: as the icon loader's callback 0x4DA5B0 */
-    int colours = player ? *(*(BYTE **)(player + 0x374) + 4) : 0;
+    const BYTE *c = (const BYTE *)0x799F7C + (player ? *(*(BYTE **)(player + 0x374) + 4) : 0) * 6;
+    char colours[13];                        /* by value: SetFactionCol replaces the table's defaults */
+    snprintf(colours, sizeof colours, "%02x%02x%02x%02x%02x%02x", c[0], c[1], c[2], c[3], c[4], c[5]);
     IDirect3DTexture9 *tex = hd_card(g_dev9, *(const char **)(info + 0x78), colours);
     if (!tex) return 0;
 

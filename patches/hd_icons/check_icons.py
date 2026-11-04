@@ -12,7 +12,7 @@ GAME = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, os.path.join(GAME, 'tools'))
 sys.path.insert(0, HERE)
 import bif
-from build_icons import fnv, sources, OUT
+from build_icons import sprite_hash, sources, OUT
 
 def read_png(path):
     d = open(path, 'rb').read(); p = 8; idat = b''
@@ -50,7 +50,7 @@ def error(path, b, fr):
 if __name__ == '__main__':
     bad = []; seen = set()
     for path, _ in sources(['campmap', 'frontend_files']):
-        with open(path, 'rb') as f: hsh = '%08x' % fnv(f.read(0x214))
+        with open(path, 'rb') as f: hsh = '%08x' % sprite_hash(f.read())
         if hsh in seen: continue
         seen.add(hsh)
         try: b = bif.read(path)

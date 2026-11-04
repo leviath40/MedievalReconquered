@@ -22,6 +22,11 @@ cursor drawn on top are kept. Sprites made at runtime (portraits converted from 
 cards) have no file on disk: the proxy saves them once to `hd_icons/_pending/`, and the next run of the
 script upscales them. Run it again after playing to pick those up.
 
-Battle unit cards: `python patches\hd_icons\build_card_icons.py` writes `hd_icons/battle/<unit>_<colours>.png`,
-each of the 161 `Battle\UnitIcons` pictures in the 21 faction colour sets, upscaled 3x (3,381 files, ~100 MB,
-under 2 minutes). Used with `CardIcons=1` and `HDIcons=1` (report section 14).
+Faction colours: the game recolours unit cards per faction, so each faction needs its own files.
+
+    python patches\hd_iconsaction_cards.py        queues every campaign unit card in all 33 colour pairs
+    python patches\hd_iconsuild_icons.py          upscales the queue
+    python patches\hd_iconsuild_card_icons.py     battle unit-card pictures (hd_icons/battle/)
+
+The battle pictures are used with `CardIcons=1` and `HDIcons=1` (report section 14). Sprites the proxy sees with no HD copy still land in
+`hd_icons/_pending/`: run `build_icons.py` after playing to pick them up.
