@@ -69,6 +69,8 @@ still work during a session. A resolution the game does not offer is ignored (lo
   initialisers run, the proxy copies it with a label and a switch appended (cloned from the
   Wildlife ones) and points the game at the copy. The switch callback mirrors the Smoke switch
   and writes `Borderless=` to the ini. Details and addresses: `analysis/MedievalReconquered_overview.md` §7.
+- Alt+F4: the game ignores it, so a small thread polls the keys and ends the process at once when
+  the game has focus. It works on loading screens and during hangs. Nothing is saved.
 - Resolution override: `Medieval.Cfg` stores the campaign/battle resolutions as indices into
   mode lists the game builds at startup. The proxy hooks the instruction that reads them
   (0x6DE4BE) and writes the indices of the ini resolutions first. Details: report §7.3.

@@ -8,6 +8,7 @@ patch scripts and sources; they are applied to your own install.
 ### Display and launcher
 - **Borderless fullscreen** (`patches/d3d9_proxy/`, a `d3d9.dll` proxy): instant alt-tab, aspect
   ratio kept, mouse mapped correctly; on/off switch added to the game's Video options menu.
+- **Alt+F4 quits the game** at once, even on loading screens (nothing is saved).
 - **Launcher** (`patches/launcher/`): campaign map and battle resolution (any monitor mode),
   display mode, FPS counter, 60 FPS cap. (Fixed: campaign and battle resolutions were applied
   the wrong way round.)
